@@ -142,6 +142,22 @@ def test_test_operation_uses_existing_approval_queue_and_cancellation_lifecycle(
     assert queued.status is OperationStatus.QUEUED
     assert cancelled.status is OperationStatus.CANCEL_REQUESTED
     assert cancelled.recovery_state is RecoveryState.NONE
+    replayed = service.read_operation_events_after(
+        tenant_id=operation.tenant_id,
+        project_id=operation.project_id,
+        last_event_id=None,
+    )
+    assert replayed is not None
+    assert service.list_operation_events(
+        tenant_id=operation.tenant_id,
+        project_id=operation.project_id,
+        operation_id=operation.operation_id,
+    ) == replayed
+    assert service.read_operation_events_after(
+        tenant_id=operation.tenant_id,
+        project_id=operation.project_id,
+        last_event_id="operation-event-unknown",
+    ) is None
     with sqlite3.connect(tmp_path / "execution.sqlite3") as connection:
         events = tuple(
             OperationEvent.model_validate_json(row[0])

@@ -208,5 +208,27 @@ class ExecutionOperationService:
     def get_receipt(self, *, tenant_id: str, project_id: str, operation_id: str) -> OperationReceipt | None:
         return self._store.get_receipt(tenant_id, project_id, operation_id)
 
+    def list_operation_events(
+        self, *, tenant_id: str, project_id: str, operation_id: str, limit: int = 100
+    ):
+        return self._store.list_operation_events(
+            tenant_id, project_id, operation_id, limit=limit
+        )
+
+    def read_operation_events_after(
+        self,
+        *,
+        tenant_id: str,
+        project_id: str,
+        last_event_id: str | None,
+        limit: int = 100,
+    ):
+        return self._store.read_operation_events_after(
+            tenant_id,
+            project_id,
+            last_event_id=last_event_id,
+            limit=limit,
+        )
+
 
 __all__ = ("ExecutionOperationService", "ExecutionRejected", "ExecutionUnavailable")

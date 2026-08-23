@@ -244,3 +244,97 @@ def test_event_log_rejects_duplicate_identity_and_tampered_body(tmp_path) -> Non
     payload["reason_code"] = "TAMPERED"
     with pytest.raises(ValidationError, match="fingerprint mismatch"):
         OperationEvent.model_validate_json(json.dumps(payload))
+
+
+def test_event_queries_are_ordered_paginated_and_operation_scoped(tmp_path) -> None:
+    store = SQLiteExecutionStore(tmp_path / "execution.sqlite3")
+    first_operation = _operation(operation_id="operation-test-store-1")
+    second_operation = _operation(operation_id="operation-test-store-2")
+    first = store._append_event(
+        operation=first_operation,
+        event_type=OperationEventType.OPERATION_CREATED,
+        status=OperationStatus.WAIT_APPROVAL,
+        recovery_state=RecoveryState.NONE,
+        reason_code="AWAITING_EXPLICIT_APPROVAL",
+        occurred_at=NOW,
+        event_id="operation-event-query-1",
+    )
+    second = store._append_event(
+        operation=second_operation,
+        event_type=OperationEventType.OPERATION_CREATED,
+        status=OperationStatus.WAIT_APPROVAL,
+        recovery_state=RecoveryState.NONE,
+        reason_code="AWAITING_EXPLICIT_APPROVAL",
+        occurred_at=NOW + timedelta(seconds=1),
+        event_id="operation-event-query-2",
+    )
+    third = store._append_event(
+        operation=first_operation,
+        event_type=OperationEventType.APPROVAL_ISSUED,
+        status=OperationStatus.WAIT_APPROVAL,
+        recovery_state=RecoveryState.NONE,
+        reason_code="APPROVAL_ISSUED",
+        occurred_at=NOW + timedelta(seconds=2),
+        event_id="operation-event-query-3",
+    )
+
+    assert store.list_operation_events(
+        "tenant-1", "project-1", first_operation.operation_id
+    ) == (first, third)
+    assert store.read_operation_events_after(
+        "tenant-1", "project-1", last_event_id=None, limit=2
+    ) == (first, second)
+    assert store.read_operation_events_after(
+        "tenant-1", "project-1", last_event_id=second.event_id, limit=10
+    ) == (third,)
+
+
+def test_event_cursor_is_scope_bound_and_tampered_rows_fail_closed(tmp_path) -> None:
+    database = tmp_path / "execution.sqlite3"
+    store = SQLiteExecutionStore(database)
+    operation = _operation()
+    event = store._append_event(
+        operation=operation,
+        event_type=OperationEventType.OPERATION_CREATED,
+        status=OperationStatus.WAIT_APPROVAL,
+        recovery_state=RecoveryState.NONE,
+        reason_code="AWAITING_EXPLICIT_APPROVAL",
+        occurred_at=NOW,
+        event_id="operation-event-scope-1",
+    )
+
+    assert store.read_operation_events_after(
+        "tenant-1", "project-other", last_event_id=event.event_id
+    ) is None
+    assert store.read_operation_events_after(
+        "tenant-other", "project-1", last_event_id=event.event_id
+    ) is None
+    assert store.read_operation_events_after(
+        "tenant-1", "project-1", last_event_id="operation-event-unknown"
+    ) is None
+
+    with sqlite3.connect(database) as connection:
+        payload = json.loads(
+            connection.execute(
+                "SELECT body FROM v66_operation_events WHERE event_id=?",
+                (event.event_id,),
+            ).fetchone()[0]
+        )
+        payload["reason_code"] = "TAMPERED"
+        connection.execute(
+            "UPDATE v66_operation_events SET body=? WHERE event_id=?",
+            (json.dumps(payload), event.event_id),
+        )
+    with pytest.raises(ValidationError, match="fingerprint mismatch"):
+        store.list_operation_events(
+            "tenant-1", "project-1", operation.operation_id
+        )
+
+
+@pytest.mark.parametrize("limit", (0, 101, True, "10"))
+def test_event_queries_reject_invalid_limits(tmp_path, limit) -> None:
+    store = SQLiteExecutionStore(tmp_path / "execution.sqlite3")
+    with pytest.raises(ValueError, match="limit"):
+        store.read_operation_events_after(
+            "tenant-1", "project-1", last_event_id=None, limit=limit
+        )

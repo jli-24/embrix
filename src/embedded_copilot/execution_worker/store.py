@@ -30,6 +30,7 @@ from .contracts import (
     TestOperation,
     UartObservationOperation,
     TargetDiscoveryCandidate,
+    identifier,
 )
 
 T = TypeVar("T", bound=FingerprintedContract)
@@ -192,6 +193,59 @@ class SQLiteExecutionStore:
                 raise
             connection.execute("COMMIT")
         return event
+
+    @staticmethod
+    def _event_limit(limit: int) -> int:
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("event query limit is invalid")
+        return limit
+
+    def list_operation_events(
+        self,
+        tenant_id: str,
+        project_id: str,
+        operation_id: str,
+        *,
+        limit: int = 100,
+    ) -> tuple[OperationEvent, ...]:
+        tenant_id = identifier(tenant_id, field="tenant_id")
+        project_id = identifier(project_id, field="project_id")
+        operation_id = identifier(operation_id, field="operation_id")
+        limit = self._event_limit(limit)
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                "SELECT body FROM v66_operation_events WHERE tenant_id=? AND project_id=? AND operation_id=? ORDER BY sequence LIMIT ?",
+                (tenant_id, project_id, operation_id, limit),
+            ).fetchall()
+        return tuple(OperationEvent.model_validate_json(row["body"]) for row in rows)
+
+    def read_operation_events_after(
+        self,
+        tenant_id: str,
+        project_id: str,
+        *,
+        last_event_id: str | None,
+        limit: int = 100,
+    ) -> tuple[OperationEvent, ...] | None:
+        tenant_id = identifier(tenant_id, field="tenant_id")
+        project_id = identifier(project_id, field="project_id")
+        limit = self._event_limit(limit)
+        with self._lock, self._connect() as connection:
+            after_sequence = 0
+            if last_event_id is not None:
+                last_event_id = identifier(last_event_id, field="last_event_id")
+                cursor = connection.execute(
+                    "SELECT sequence FROM v66_operation_events WHERE tenant_id=? AND project_id=? AND event_id=?",
+                    (tenant_id, project_id, last_event_id),
+                ).fetchone()
+                if cursor is None:
+                    return None
+                after_sequence = int(cursor["sequence"])
+            rows = connection.execute(
+                "SELECT body FROM v66_operation_events WHERE tenant_id=? AND project_id=? AND sequence>? ORDER BY sequence LIMIT ?",
+                (tenant_id, project_id, after_sequence, limit),
+            ).fetchall()
+        return tuple(OperationEvent.model_validate_json(row["body"]) for row in rows)
 
     def _get(self, kind: str, tenant_id: str, project_id: str, object_id: str, model: type[T]) -> T | None:
         with self._lock, self._connect() as connection:
