@@ -17,12 +17,14 @@ from .contracts import (
     FlashOperation,
     FingerprintedContract,
     HilOperation,
+    HilStepKind,
     OperationEvent,
     OperationEventType,
     OperationApprovalGrant,
     OperationReceipt,
     OperationStatus,
     OperationStatusView,
+    OperationType,
     RecoveryDecision,
     RecoveryState,
     TestOperation,
@@ -199,6 +201,433 @@ class SQLiteExecutionStore:
             ).fetchone()
         return self._load(row, model)
 
+    @staticmethod
+    def _operation_from_body(body: str):
+        payload = json.loads(body)
+        model = {
+            "BUILD": BuildOperation,
+            "TEST": TestOperation,
+            "FLASH": FlashOperation,
+            "UART_OBSERVATION": UartObservationOperation,
+            "HIL": HilOperation,
+        }.get(payload.get("operation_type"))
+        if model is None:
+            return None
+        if model is HilOperation:
+            payload["operation_type"] = OperationType.HIL
+            for step in payload["scenario"]["steps"]:
+                step["kind"] = HilStepKind(step["kind"])
+            return model.model_validate(payload)
+        return model.model_validate_json(body, strict=False)
+
+    @staticmethod
+    def _write_object(
+        connection: sqlite3.Connection,
+        *,
+        kind: str,
+        value: FingerprintedContract,
+        object_id: str,
+        replace: bool = False,
+    ) -> None:
+        verb = "INSERT OR REPLACE" if replace else "INSERT"
+        connection.execute(
+            f"{verb} INTO v66_objects(kind, tenant_id, project_id, object_id, body) VALUES(?,?,?,?,?)",
+            (kind, value.tenant_id, value.project_id, object_id, SQLiteExecutionStore._body(value)),
+        )
+
+    def _require_persisted_operation(
+        self, connection: sqlite3.Connection, operation: T
+    ) -> None:
+        row = connection.execute(
+            "SELECT body FROM v66_objects WHERE kind='operation' AND tenant_id=? AND project_id=? AND object_id=?",
+            (operation.tenant_id, operation.project_id, operation.operation_id),
+        ).fetchone()
+        persisted = None if row is None else self._operation_from_body(row["body"])
+        if persisted != operation:
+            raise ValueError("operation identity changed")
+
+    def create_operation_transition(
+        self, operation: T, status: OperationStatusView, *, occurred_at: datetime
+    ) -> OperationStatusView:
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._write_object(
+                    connection,
+                    kind="operation",
+                    value=operation,
+                    object_id=operation.operation_id,
+                )
+                self._write_object(
+                    connection,
+                    kind="status",
+                    value=status,
+                    object_id=status.operation_id,
+                )
+                self._append_event_in_transaction(
+                    connection,
+                    operation=operation,
+                    event_type=OperationEventType.OPERATION_CREATED,
+                    status=status.status,
+                    recovery_state=status.recovery_state,
+                    reason_code="AWAITING_EXPLICIT_APPROVAL",
+                    occurred_at=occurred_at,
+                )
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+            connection.execute("COMMIT")
+        return status
+
+    def issue_approval_transition(
+        self, operation: T, approval: OperationApprovalGrant
+    ) -> OperationApprovalGrant:
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._require_persisted_operation(connection, operation)
+                status_row = connection.execute(
+                    "SELECT body FROM v66_objects WHERE kind='status' AND tenant_id=? AND project_id=? AND object_id=?",
+                    (operation.tenant_id, operation.project_id, operation.operation_id),
+                ).fetchone()
+                status = self._load(status_row, OperationStatusView)
+                if status is None or status.status is not OperationStatus.WAIT_APPROVAL:
+                    raise ValueError("operation is not awaiting approval")
+                self._write_object(
+                    connection,
+                    kind="approval",
+                    value=approval,
+                    object_id=approval.grant_id,
+                )
+                self._append_event_in_transaction(
+                    connection,
+                    operation=operation,
+                    event_type=OperationEventType.APPROVAL_ISSUED,
+                    status=status.status,
+                    recovery_state=status.recovery_state,
+                    reason_code="APPROVAL_ISSUED",
+                    occurred_at=approval.issued_at,
+                    approval_id=approval.grant_id,
+                )
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+            connection.execute("COMMIT")
+        return approval
+
+    def enqueue_transition(
+        self,
+        operation: T,
+        approval: OperationApprovalGrant,
+        *,
+        occurred_at: datetime,
+    ) -> OperationStatusView:
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._require_persisted_operation(connection, operation)
+                status_row = connection.execute(
+                    "SELECT body FROM v66_objects WHERE kind='status' AND tenant_id=? AND project_id=? AND object_id=?",
+                    (operation.tenant_id, operation.project_id, operation.operation_id),
+                ).fetchone()
+                current = self._load(status_row, OperationStatusView)
+                approval_row = connection.execute(
+                    "SELECT body FROM v66_objects WHERE kind='approval' AND tenant_id=? AND project_id=? AND object_id=?",
+                    (operation.tenant_id, operation.project_id, approval.grant_id),
+                ).fetchone()
+                persisted_approval = self._load(approval_row, OperationApprovalGrant)
+                if (
+                    current is None
+                    or current.status is not OperationStatus.WAIT_APPROVAL
+                    or persisted_approval != approval
+                    or approval.operation_id != operation.operation_id
+                    or approval.operation_type is not operation.operation_type
+                    or approval.operation_fingerprint != operation.fingerprint
+                    or approval.status is not ApprovalStatus.ISSUED
+                ):
+                    raise ValueError("approval binding mismatch")
+                updated = OperationStatusView.model_validate(
+                    {
+                        **current.model_dump(mode="python"),
+                        "status": OperationStatus.QUEUED,
+                        "approval_id": approval.grant_id,
+                        "updated_at": occurred_at,
+                        "fingerprint": "sha256:" + "0" * 64,
+                    }
+                )
+                connection.execute(
+                    "UPDATE v66_objects SET body=? WHERE kind='status' AND tenant_id=? AND project_id=? AND object_id=? AND body=?",
+                    (
+                        self._body(updated),
+                        operation.tenant_id,
+                        operation.project_id,
+                        operation.operation_id,
+                        self._body(current),
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO v66_queue(tenant_id, project_id, operation_id, state, worker_id, lease_until) VALUES(?,?,?,?,NULL,NULL)",
+                    (operation.tenant_id, operation.project_id, operation.operation_id, "QUEUED"),
+                )
+                self._append_event_in_transaction(
+                    connection,
+                    operation=operation,
+                    event_type=OperationEventType.OPERATION_QUEUED,
+                    status=updated.status,
+                    recovery_state=updated.recovery_state,
+                    reason_code="APPROVAL_BOUND",
+                    occurred_at=occurred_at,
+                    approval_id=approval.grant_id,
+                )
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+            connection.execute("COMMIT")
+        return updated
+
+    def start_operation_transition(
+        self,
+        operation: T,
+        *,
+        approval_id: str,
+        worker_id: str,
+        now: datetime,
+    ) -> OperationStatusView | None:
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._require_persisted_operation(connection, operation)
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+            status_row = connection.execute(
+                "SELECT body FROM v66_objects WHERE kind='status' AND tenant_id=? AND project_id=? AND object_id=?",
+                (operation.tenant_id, operation.project_id, operation.operation_id),
+            ).fetchone()
+            approval_row = connection.execute(
+                "SELECT body FROM v66_objects WHERE kind='approval' AND tenant_id=? AND project_id=? AND object_id=?",
+                (operation.tenant_id, operation.project_id, approval_id),
+            ).fetchone()
+            queue_row = connection.execute(
+                "SELECT state, worker_id FROM v66_queue WHERE tenant_id=? AND project_id=? AND operation_id=?",
+                (operation.tenant_id, operation.project_id, operation.operation_id),
+            ).fetchone()
+            status = self._load(status_row, OperationStatusView)
+            approval = self._load(approval_row, OperationApprovalGrant)
+            if (
+                status is None
+                or status.status is not OperationStatus.QUEUED
+                or status.approval_id != approval_id
+                or approval is None
+                or approval.operation_id != operation.operation_id
+                or approval.operation_type is not operation.operation_type
+                or approval.operation_fingerprint != operation.fingerprint
+                or approval.status is not ApprovalStatus.ISSUED
+                or now >= approval.expires_at
+                or queue_row is None
+                or queue_row["state"] != "CLAIMED"
+                or queue_row["worker_id"] != worker_id
+            ):
+                connection.execute("ROLLBACK")
+                return None
+            try:
+                consumed = OperationApprovalGrant.model_validate(
+                    {
+                        **approval.model_dump(mode="python"),
+                        "status": ApprovalStatus.CONSUMED,
+                        "fingerprint": "sha256:" + "0" * 64,
+                    }
+                )
+                running = OperationStatusView.model_validate(
+                    {
+                        **status.model_dump(mode="python"),
+                        "status": OperationStatus.RUNNING,
+                        "worker_id": worker_id,
+                        "updated_at": now,
+                        "fingerprint": "sha256:" + "0" * 64,
+                    }
+                )
+                connection.execute(
+                    "UPDATE v66_objects SET body=? WHERE kind='approval' AND tenant_id=? AND project_id=? AND object_id=? AND body=?",
+                    (self._body(consumed), operation.tenant_id, operation.project_id, approval_id, self._body(approval)),
+                )
+                connection.execute(
+                    "UPDATE v66_objects SET body=? WHERE kind='status' AND tenant_id=? AND project_id=? AND object_id=? AND body=?",
+                    (self._body(running), operation.tenant_id, operation.project_id, operation.operation_id, self._body(status)),
+                )
+                self._append_event_in_transaction(
+                    connection,
+                    operation=operation,
+                    event_type=OperationEventType.OPERATION_STARTED,
+                    status=running.status,
+                    recovery_state=running.recovery_state,
+                    reason_code="APPROVAL_CONSUMED",
+                    occurred_at=now,
+                    approval_id=approval_id,
+                )
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+            connection.execute("COMMIT")
+        return running
+
+    def cancellation_transition(
+        self,
+        operation: T,
+        request: CancellationRequest,
+        current: OperationStatusView,
+        updated: OperationStatusView,
+    ) -> OperationStatusView:
+        event_type = (
+            OperationEventType.CANCELLATION_PENDING
+            if updated.status is OperationStatus.CANCEL_PENDING
+            else OperationEventType.CANCELLATION_REQUESTED
+        )
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._require_persisted_operation(connection, operation)
+                row = connection.execute(
+                    "SELECT body FROM v66_objects WHERE kind='status' AND tenant_id=? AND project_id=? AND object_id=?",
+                    (operation.tenant_id, operation.project_id, operation.operation_id),
+                ).fetchone()
+                persisted = self._load(row, OperationStatusView)
+                if persisted != current:
+                    raise ValueError("operation state changed")
+                self._write_object(connection, kind="cancellation", value=request, object_id=request.request_id)
+                connection.execute(
+                    "UPDATE v66_objects SET body=? WHERE kind='status' AND tenant_id=? AND project_id=? AND object_id=? AND body=?",
+                    (self._body(updated), operation.tenant_id, operation.project_id, operation.operation_id, self._body(current)),
+                )
+                self._append_event_in_transaction(
+                    connection,
+                    operation=operation,
+                    event_type=event_type,
+                    status=updated.status,
+                    recovery_state=updated.recovery_state,
+                    reason_code="OPERATOR_REQUESTED_CANCELLATION",
+                    occurred_at=request.requested_at,
+                    approval_id=updated.approval_id,
+                )
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+            connection.execute("COMMIT")
+        return updated
+
+    def terminal_transition(
+        self,
+        operation: T,
+        current: OperationStatusView,
+        updated: OperationStatusView,
+        *,
+        reason_code: str,
+        receipt: OperationReceipt | None = None,
+    ) -> OperationStatusView:
+        event_type = {
+            OperationStatus.SUCCEEDED: OperationEventType.OPERATION_SUCCEEDED,
+            OperationStatus.FAILED: OperationEventType.OPERATION_FAILED,
+            OperationStatus.CANCELLED: OperationEventType.OPERATION_CANCELLED,
+            OperationStatus.TIMED_OUT: OperationEventType.OPERATION_TIMED_OUT,
+        }.get(updated.status)
+        if event_type is None:
+            raise ValueError("terminal operation status is invalid")
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._require_persisted_operation(connection, operation)
+                row = connection.execute(
+                    "SELECT body FROM v66_objects WHERE kind='status' AND tenant_id=? AND project_id=? AND object_id=?",
+                    (operation.tenant_id, operation.project_id, operation.operation_id),
+                ).fetchone()
+                persisted = self._load(row, OperationStatusView)
+                if persisted != current or current.status not in {
+                    OperationStatus.QUEUED,
+                    OperationStatus.RUNNING,
+                    OperationStatus.CANCEL_REQUESTED,
+                    OperationStatus.CANCEL_PENDING,
+                }:
+                    raise ValueError("operation state changed")
+                if receipt is not None:
+                    if (
+                        receipt.operation_id != operation.operation_id
+                        or receipt.operation_type is not operation.operation_type
+                        or receipt.status is not updated.status
+                        or updated.receipt_fingerprint != receipt.fingerprint
+                    ):
+                        raise ValueError("receipt binding mismatch")
+                    self._write_object(
+                        connection,
+                        kind="receipt",
+                        value=receipt,
+                        object_id=receipt.operation_id,
+                        replace=True,
+                    )
+                connection.execute(
+                    "UPDATE v66_queue SET state=?, worker_id=NULL, lease_until=NULL WHERE tenant_id=? AND project_id=? AND operation_id=?",
+                    (updated.status.value, operation.tenant_id, operation.project_id, operation.operation_id),
+                )
+                connection.execute(
+                    "UPDATE v66_objects SET body=? WHERE kind='status' AND tenant_id=? AND project_id=? AND object_id=? AND body=?",
+                    (self._body(updated), operation.tenant_id, operation.project_id, operation.operation_id, self._body(current)),
+                )
+                self._append_event_in_transaction(
+                    connection,
+                    operation=operation,
+                    event_type=event_type,
+                    status=updated.status,
+                    recovery_state=updated.recovery_state,
+                    reason_code=reason_code,
+                    occurred_at=updated.updated_at,
+                    approval_id=updated.approval_id,
+                    receipt_fingerprint=updated.receipt_fingerprint,
+                )
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+            connection.execute("COMMIT")
+        return updated
+
+    def recovery_resolution_transition(
+        self,
+        operation: T,
+        current: OperationStatusView,
+        decision: RecoveryDecision,
+        updated: OperationStatusView,
+    ) -> OperationStatusView:
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._require_persisted_operation(connection, operation)
+                row = connection.execute(
+                    "SELECT body FROM v66_objects WHERE kind='status' AND tenant_id=? AND project_id=? AND object_id=?",
+                    (operation.tenant_id, operation.project_id, operation.operation_id),
+                ).fetchone()
+                persisted = self._load(row, OperationStatusView)
+                if persisted != current or current.status is not OperationStatus.RECOVERY_REQUIRED:
+                    raise ValueError("operation state changed")
+                self._write_object(connection, kind="recovery", value=decision, object_id=decision.decision_id)
+                connection.execute(
+                    "UPDATE v66_objects SET body=? WHERE kind='status' AND tenant_id=? AND project_id=? AND object_id=? AND body=?",
+                    (self._body(updated), operation.tenant_id, operation.project_id, operation.operation_id, self._body(current)),
+                )
+                self._append_event_in_transaction(
+                    connection,
+                    operation=operation,
+                    event_type=OperationEventType.RECOVERY_RESOLVED,
+                    status=updated.status,
+                    recovery_state=updated.recovery_state,
+                    reason_code="RECOVERY_DECISION_APPLIED",
+                    occurred_at=decision.decided_at,
+                    approval_id=updated.approval_id,
+                    receipt_fingerprint=updated.receipt_fingerprint,
+                )
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+            connection.execute("COMMIT")
+        return updated
+
     def save_proposal(self, value: ExecutionProposal) -> ExecutionProposal:
         return self._save("proposal", value, object_id=value.proposal_id)
 
@@ -213,17 +642,7 @@ class SQLiteExecutionStore:
             ).fetchone()
         if row is None:
             return None
-        body = json.loads(row["body"])
-        model = {
-            "BUILD": BuildOperation,
-            "TEST": TestOperation,
-            "FLASH": FlashOperation,
-            "UART_OBSERVATION": UartObservationOperation,
-            "HIL": HilOperation,
-        }.get(body.get("operation_type"))
-        if model is None:
-            return None
-        return model.model_validate_json(row["body"])
+        return self._operation_from_body(row["body"])
 
     def list_operations(self, tenant_id: str, project_id: str, *, limit: int = 20) -> tuple[object, ...]:
         if type(limit) is not int or not 1 <= limit <= 100:
@@ -235,16 +654,9 @@ class SQLiteExecutionStore:
             ).fetchall()
         result: list[object] = []
         for row in rows:
-            body = json.loads(row["body"])
-            model = {
-                "BUILD": BuildOperation,
-                "TEST": TestOperation,
-                "FLASH": FlashOperation,
-                "UART_OBSERVATION": UartObservationOperation,
-                "HIL": HilOperation,
-            }.get(body.get("operation_type"))
-            if model is not None:
-                result.append(model.model_validate_json(row["body"]))
+            operation = self._operation_from_body(row["body"])
+            if operation is not None:
+                result.append(operation)
         return tuple(result)
 
     def get_proposal(self, tenant_id: str, project_id: str, proposal_id: str) -> ExecutionProposal | None:
@@ -337,6 +749,29 @@ class SQLiteExecutionStore:
                 "UPDATE v66_queue SET state='CLAIMED', worker_id=?, lease_until=? WHERE tenant_id=? AND project_id=? AND operation_id=? AND state='QUEUED'",
                 (worker_id, lease, row["tenant_id"], row["project_id"], row["operation_id"]),
             )
+            status_row = connection.execute(
+                "SELECT body FROM v66_objects WHERE kind='status' AND tenant_id=? AND project_id=? AND object_id=?",
+                (row["tenant_id"], row["project_id"], row["operation_id"]),
+            ).fetchone()
+            operation = self.get_operation(
+                row["tenant_id"], row["project_id"], row["operation_id"]
+            )
+            status = self._load(status_row, OperationStatusView)
+            if operation is not None and status is not None:
+                try:
+                    self._append_event_in_transaction(
+                        connection,
+                        operation=operation,
+                        event_type=OperationEventType.OPERATION_CLAIMED,
+                        status=status.status,
+                        recovery_state=status.recovery_state,
+                        reason_code="WORKER_CLAIMED",
+                        occurred_at=now,
+                        approval_id=status.approval_id,
+                    )
+                except Exception:
+                    connection.execute("ROLLBACK")
+                    raise
             connection.execute("COMMIT")
             return row["tenant_id"], row["project_id"], row["operation_id"]
 
@@ -378,7 +813,41 @@ class SQLiteExecutionStore:
                 "updated_at": now,
                 "fingerprint": "sha256:" + "0" * 64,
             })
-            self.save_status(updated)
+            operation = self.get_operation(value.tenant_id, value.project_id, value.operation_id)
+            if operation is None:
+                self.save_status(updated)
+                recovered.append(updated)
+                continue
+            with self._lock, self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    current_row = connection.execute(
+                        "SELECT body FROM v66_objects WHERE kind='status' AND tenant_id=? AND project_id=? AND object_id=?",
+                        (value.tenant_id, value.project_id, value.operation_id),
+                    ).fetchone()
+                    current = self._load(current_row, OperationStatusView)
+                    if current != value or current.status is not OperationStatus.RUNNING:
+                        connection.execute("ROLLBACK")
+                        continue
+                    connection.execute(
+                        "UPDATE v66_objects SET body=? WHERE kind='status' AND tenant_id=? AND project_id=? AND object_id=? AND body=?",
+                        (self._body(updated), value.tenant_id, value.project_id, value.operation_id, self._body(value)),
+                    )
+                    self._append_event_in_transaction(
+                        connection,
+                        operation=operation,
+                        event_type=OperationEventType.RECOVERY_REQUIRED,
+                        status=updated.status,
+                        recovery_state=updated.recovery_state,
+                        reason_code="WORKER_INTERRUPTED",
+                        occurred_at=now,
+                        approval_id=updated.approval_id,
+                        receipt_fingerprint=updated.receipt_fingerprint,
+                    )
+                except Exception:
+                    connection.execute("ROLLBACK")
+                    raise
+                connection.execute("COMMIT")
             recovered.append(updated)
         return tuple(recovered)
 

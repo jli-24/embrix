@@ -124,6 +124,14 @@ def test_running_test_recovers_as_interrupted_without_retry(tmp_path) -> None:
     assert type(
         restarted.get_operation("tenant-1", "project-1", operation.operation_id)
     ) is ExecutionTestOperation
+    with sqlite3.connect(database) as connection:
+        event = OperationEvent.model_validate_json(
+            connection.execute(
+                "SELECT body FROM v66_operation_events ORDER BY sequence DESC LIMIT 1"
+            ).fetchone()[0]
+        )
+    assert event.event_type is OperationEventType.RECOVERY_REQUIRED
+    assert event.recovery_state is RecoveryState.INTERRUPTED
 
 
 def test_event_table_is_added_to_existing_v66_database(tmp_path) -> None:

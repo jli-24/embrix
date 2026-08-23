@@ -69,12 +69,12 @@ class ExecutionWorker:
         tenant_id, project_id, operation_id = claim
         status = self._store.get_status(tenant_id, project_id, operation_id)
         if status is None or status.approval_id is None:
-            return self._fail(status, tenant_id, project_id, operation_id, "operation approval unavailable")
+            return self._fail(None, status, tenant_id, project_id, operation_id, "operation approval unavailable", "APPROVAL_UNAVAILABLE")
         # The operation payload is intentionally supplied by the application
         # composition, not reconstructed from arbitrary queue fields.
         operation = getattr(self._store, "get_operation", lambda *_: None)(tenant_id, project_id, operation_id)
         if operation is None:
-            return self._fail(status, tenant_id, project_id, operation_id, "typed operation unavailable")
+            return self._fail(None, status, tenant_id, project_id, operation_id, "typed operation unavailable", "TYPED_OPERATION_UNAVAILABLE")
         approval = self._store.get_approval(tenant_id, project_id, status.approval_id)
         if (
             approval is None
@@ -83,38 +83,41 @@ class ExecutionWorker:
             or approval.operation_fingerprint != operation.fingerprint
             or approval.status is not ApprovalStatus.ISSUED
         ):
-            return self._fail(status, tenant_id, project_id, operation_id, "approval binding mismatch")
-        consumed = self._store.consume_approval(tenant_id=tenant_id, project_id=project_id, grant_id=approval.grant_id, operation_fingerprint=operation.fingerprint, now=self._clock())
-        if consumed is None:
-            return self._fail(status, tenant_id, project_id, operation_id, "approval expired or replayed")
-        running = OperationStatusView.model_validate({**status.model_dump(mode="python"), "status": OperationStatus.RUNNING, "worker_id": self.worker_id, "updated_at": self._clock(), "fingerprint": "sha256:" + "0" * 64})
-        self._store.save_status(running)
+            return self._fail(operation, status, tenant_id, project_id, operation_id, "approval binding mismatch", "APPROVAL_BINDING_MISMATCH")
+        running = self._store.start_operation_transition(
+            operation,
+            approval_id=approval.grant_id,
+            worker_id=self.worker_id,
+            now=self._clock(),
+        )
+        if running is None:
+            return self._fail(operation, status, tenant_id, project_id, operation_id, "approval expired or replayed", "APPROVAL_EXPIRED_OR_REPLAYED")
         try:
             target = self._targets.get_bound(tenant_id=tenant_id, project_id=project_id, target_id=operation.target_id)
             if target is None or target.fingerprint != operation.target_fingerprint:
-                return self._fail(running, tenant_id, project_id, operation_id, "TARGET_MISMATCH")
+                return self._fail(operation, running, tenant_id, project_id, operation_id, "TARGET_MISMATCH", "TARGET_MISMATCH")
             target = self._targets.revalidate(target)
             if target.fingerprint != operation.target_fingerprint:
-                return self._fail(running, tenant_id, project_id, operation_id, "TARGET_MISMATCH")
+                return self._fail(operation, running, tenant_id, project_id, operation_id, "TARGET_MISMATCH", "TARGET_MISMATCH")
             workspace_root = self._workspace_resolver.resolve(tenant_id=tenant_id, project_id=project_id, snapshot_id=operation.workspace_snapshot_id, snapshot_fingerprint=operation.workspace_fingerprint)
             tool_id = getattr(getattr(operation, "toolchain", None), "toolchain_id", None) or getattr(operation, "tool_id", None) or "SERIAL_UART"
             resolution = self._registry.resolve(tool_id, target_kind=target.target_kind, operation=operation.operation_type)
             context = ExecutionContext(workspace_root=workspace_root, state_root=workspace_root / ".embedded-copilot-state", target=target, tool=resolution, cancellation=_Cancellation(self._store, tenant_id, project_id, operation_id), artifact_store=self._artifact_store)
             result = self._dispatch(operation, context)
         except TimeoutError:
-            return self._terminal(running, OperationStatus.TIMED_OUT, "operation timed out")
+            return self._terminal(operation, running, OperationStatus.TIMED_OUT, "operation timed out", "ADAPTER_TIMED_OUT")
         except InterruptedError:
-            return self._terminal(running, OperationStatus.CANCELLED, "operation cancelled")
+            return self._terminal(operation, running, OperationStatus.CANCELLED, "operation cancelled", "ADAPTER_CANCELLED")
         except (OSError, ValueError, PermissionError):
-            return self._terminal(running, OperationStatus.FAILED, "operation failed closed")
+            return self._terminal(operation, running, OperationStatus.FAILED, "operation failed closed", "ADAPTER_FAILED_CLOSED")
         status_value = {"SUCCEEDED": OperationStatus.SUCCEEDED, "FAILED": OperationStatus.FAILED, "UNAVAILABLE": OperationStatus.FAILED, "CANCELLED": OperationStatus.CANCELLED, "TIMED_OUT": OperationStatus.TIMED_OUT}.get(result.status, OperationStatus.FAILED)
         if result.artifact is not None:
             if self._artifact_store is None or result.artifact_content is None:
-                return self._terminal(running, OperationStatus.FAILED, "artifact store unavailable")
+                return self._terminal(operation, running, OperationStatus.FAILED, "artifact store unavailable", "ARTIFACT_STORE_UNAVAILABLE")
             try:
                 self._artifact_store.put(result.artifact, result.artifact_content)
             except ValueError:
-                return self._terminal(running, OperationStatus.FAILED, "artifact identity verification failed")
+                return self._terminal(operation, running, OperationStatus.FAILED, "artifact identity verification failed", "ARTIFACT_IDENTITY_INVALID")
             self._store.save_artifact(result.artifact)
         diagnostics_summary = result.summary
         if (
@@ -124,10 +127,20 @@ class ExecutionWorker:
         ):
             diagnostics_summary = "TEST_ADAPTER_NOT_CONFIGURED"
         receipt = OperationReceipt(operation_id=operation_id, tenant_id=tenant_id, project_id=project_id, operation_type=operation.operation_type, status=status_value, tool_execution_status=result.status, flash_verification_status=result.flash_verification_status, target_runtime_verification_status="NOT_VERIFIED", artifact=result.artifact, evidence_references=result.evidence_references, safe_diagnostics_summary=diagnostics_summary, recovery_state=RecoveryState.NONE, created_at=self._clock())
-        self._store.save_receipt(receipt)
-        self._store.mark_queue(tenant_id=tenant_id, project_id=project_id, operation_id=operation_id, state=status_value.value)
-        final = running.model_validate({**running.model_dump(mode="python"), "status": status_value, "worker_id": self.worker_id, "receipt_fingerprint": receipt.fingerprint, "updated_at": self._clock(), "fingerprint": "sha256:" + "0" * 64})
-        return self._store.save_status(final)
+        reason_code = {
+            OperationStatus.SUCCEEDED: "ADAPTER_SUCCEEDED",
+            OperationStatus.FAILED: diagnostics_summary if diagnostics_summary == "TEST_ADAPTER_NOT_CONFIGURED" else "ADAPTER_FAILED",
+            OperationStatus.CANCELLED: "ADAPTER_CANCELLED",
+            OperationStatus.TIMED_OUT: "ADAPTER_TIMED_OUT",
+        }[status_value]
+        return self._terminal(
+            operation,
+            running,
+            status_value,
+            diagnostics_summary,
+            reason_code,
+            receipt=receipt,
+        )
 
     def _dispatch(self, operation: BuildOperation | TestOperation | FlashOperation | UartObservationOperation | HilOperation, context: ExecutionContext):
         if operation.operation_type is OperationType.BUILD:
@@ -142,15 +155,33 @@ class ExecutionWorker:
             return self._hil.execute(operation, context)
         raise ValueError("unsupported operation")
 
-    def _fail(self, status, tenant_id: str, project_id: str, operation_id: str, detail: str):
+    def _fail(self, operation, status, tenant_id: str, project_id: str, operation_id: str, detail: str, reason_code: str):
         if status is None:
             return None
-        return self._terminal(status, OperationStatus.FAILED, detail)
+        return self._terminal(operation, status, OperationStatus.FAILED, detail, reason_code)
 
-    def _terminal(self, status: OperationStatusView, operation_status: OperationStatus, detail: str) -> OperationStatusView:
-        updated = status.model_validate({**status.model_dump(mode="python"), "status": operation_status, "safe_detail": detail, "updated_at": self._clock(), "fingerprint": "sha256:" + "0" * 64})
-        self._store.mark_queue(tenant_id=status.tenant_id, project_id=status.project_id, operation_id=status.operation_id, state=operation_status.value)
-        return self._store.save_status(updated)
+    def _terminal(self, operation, status: OperationStatusView, operation_status: OperationStatus, detail: str, reason_code: str, *, receipt: OperationReceipt | None = None) -> OperationStatusView:
+        current = self._store.get_status(status.tenant_id, status.project_id, status.operation_id) or status
+        updated = current.model_validate({
+            **current.model_dump(mode="python"),
+            "status": operation_status,
+            "safe_detail": detail,
+            "receipt_fingerprint": None if receipt is None else receipt.fingerprint,
+            "updated_at": self._clock(),
+            "fingerprint": "sha256:" + "0" * 64,
+        })
+        if operation is None:
+            if receipt is not None:
+                self._store.save_receipt(receipt)
+            self._store.mark_queue(tenant_id=status.tenant_id, project_id=status.project_id, operation_id=status.operation_id, state=operation_status.value)
+            return self._store.save_status(updated)
+        return self._store.terminal_transition(
+            operation,
+            current,
+            updated,
+            reason_code=reason_code,
+            receipt=receipt,
+        )
 
 
 __all__ = ("ExecutionWorker",)

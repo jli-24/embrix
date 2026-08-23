@@ -66,22 +66,21 @@ class ExecutionOperationService:
             if existing.operation_type is not operation.operation_type:
                 raise ExecutionRejected("operation identity conflict")
             return request
-        self._store.save_operation(operation)
-        self._store.save_status(
-            OperationStatusView(
-                operation_id=operation.operation_id,
-                tenant_id=operation.tenant_id,
-                project_id=operation.project_id,
-                operation_type=operation.operation_type,
-                status=OperationStatus.WAIT_APPROVAL,
-                approval_id=None,
-                worker_id=None,
-                recovery_state=RecoveryState.NONE,
-                cancellation_requested=False,
-                updated_at=self._clock(),
-                safe_detail="operation awaits explicit capability approval",
-            )
+        now = self._clock()
+        status = OperationStatusView(
+            operation_id=operation.operation_id,
+            tenant_id=operation.tenant_id,
+            project_id=operation.project_id,
+            operation_type=operation.operation_type,
+            status=OperationStatus.WAIT_APPROVAL,
+            approval_id=None,
+            worker_id=None,
+            recovery_state=RecoveryState.NONE,
+            cancellation_requested=False,
+            updated_at=now,
+            safe_detail="operation awaits explicit capability approval",
         )
+        self._store.create_operation_transition(operation, status, occurred_at=now)
         return request
 
     def get_operation(self, *, tenant_id: str, project_id: str, operation_id: str):
@@ -138,7 +137,7 @@ class ExecutionOperationService:
             nonce=nonce,
             issued_at=now,
         )
-        return self._store.save_approval(grant)
+        return self._store.issue_approval_transition(op, grant)
 
     def enqueue(self, *, operation: OperationRequest, approval_id: str) -> OperationStatusView:
         op = operation.operation
@@ -156,19 +155,31 @@ class ExecutionOperationService:
             or approval.status is not ApprovalStatus.ISSUED
         ):
             raise ExecutionRejected("approval binding mismatch")
-        updated = status.model_validate({**status.model_dump(mode="python"), "status": OperationStatus.QUEUED, "approval_id": approval.grant_id, "updated_at": self._clock(), "fingerprint": "sha256:" + "0" * 64})
-        self._store.save_status(updated)
-        self._store.enqueue(tenant_id=op.tenant_id, project_id=op.project_id, operation_id=op.operation_id)
-        return updated
+        try:
+            return self._store.enqueue_transition(
+                op, approval, occurred_at=self._clock()
+            )
+        except ValueError as exc:
+            raise ExecutionRejected("approval binding mismatch") from exc
 
     def request_cancellation(self, request: CancellationRequest) -> OperationStatusView:
         status = self._store.get_status(request.tenant_id, request.project_id, request.operation_id)
         if status is None:
             raise ExecutionRejected("operation not found")
-        self._store.save_cancellation(request)
         cancellation_status = OperationStatus.CANCEL_PENDING if status.operation_type is OperationType.FLASH and status.status is OperationStatus.RUNNING else OperationStatus.CANCEL_REQUESTED
         updated = status.model_validate({**status.model_dump(mode="python"), "status": cancellation_status, "cancellation_requested": True, "updated_at": self._clock(), "fingerprint": "sha256:" + "0" * 64})
-        return self._store.save_status(updated)
+        operation = self._store.get_operation(
+            request.tenant_id, request.project_id, request.operation_id
+        )
+        if operation is None:
+            self._store.save_cancellation(request)
+            return self._store.save_status(updated)
+        try:
+            return self._store.cancellation_transition(
+                operation, request, status, updated
+            )
+        except ValueError as exc:
+            raise ExecutionRejected("operation state changed") from exc
 
     def apply_recovery_decision(self, decision: RecoveryDecision) -> OperationStatusView:
         status = self._store.get_status(decision.tenant_id, decision.project_id, decision.operation_id)
@@ -176,10 +187,20 @@ class ExecutionOperationService:
             raise ExecutionRejected("operation is not awaiting recovery")
         if status.operation_type is OperationType.FLASH and decision.decision != "REQUIRES_MANUAL_INTERVENTION":
             raise ExecutionRejected("flash recovery requires explicit manual intervention")
-        self._store.save_recovery_decision(decision)
         updated_status = OperationStatus.FAILED if decision.decision != "MARK_TARGET_SAFE" else OperationStatus.CANCELLED
         updated = status.model_validate({**status.model_dump(mode="python"), "status": updated_status, "recovery_state": RecoveryState.RECOVERED, "updated_at": self._clock(), "fingerprint": "sha256:" + "0" * 64})
-        return self._store.save_status(updated)
+        operation = self._store.get_operation(
+            decision.tenant_id, decision.project_id, decision.operation_id
+        )
+        if operation is None:
+            self._store.save_recovery_decision(decision)
+            return self._store.save_status(updated)
+        try:
+            return self._store.recovery_resolution_transition(
+                operation, status, decision, updated
+            )
+        except ValueError as exc:
+            raise ExecutionRejected("operation state changed") from exc
 
     def get_status(self, *, tenant_id: str, project_id: str, operation_id: str) -> OperationStatusView | None:
         return self._store.get_status(tenant_id, project_id, operation_id)

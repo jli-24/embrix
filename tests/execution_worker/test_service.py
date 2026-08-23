@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -10,6 +11,8 @@ from embedded_copilot.execution_worker.contracts import (
     BuildOperation,
     CancellationRequest,
     OperationApprovalGrant,
+    OperationEvent,
+    OperationEventType,
     OperationRequest,
     OperationStatus,
     OperationStatusView,
@@ -20,6 +23,7 @@ from embedded_copilot.execution_worker.contracts import (
     TargetDiscoveryCandidate,
     ExecutionTarget,
     TargetBindingStatus,
+    RecoveryDecision,
 )
 from embedded_copilot.execution_worker.service import ExecutionOperationService, ExecutionRejected
 from embedded_copilot.execution_worker.store import SQLiteExecutionStore
@@ -138,6 +142,81 @@ def test_test_operation_uses_existing_approval_queue_and_cancellation_lifecycle(
     assert queued.status is OperationStatus.QUEUED
     assert cancelled.status is OperationStatus.CANCEL_REQUESTED
     assert cancelled.recovery_state is RecoveryState.NONE
+    with sqlite3.connect(tmp_path / "execution.sqlite3") as connection:
+        events = tuple(
+            OperationEvent.model_validate_json(row[0])
+            for row in connection.execute(
+                "SELECT body FROM v66_operation_events ORDER BY sequence"
+            ).fetchall()
+        )
+    assert tuple(event.event_type for event in events) == (
+        OperationEventType.OPERATION_CREATED,
+        OperationEventType.APPROVAL_ISSUED,
+        OperationEventType.OPERATION_QUEUED,
+        OperationEventType.CANCELLATION_REQUESTED,
+    )
+    assert all(event.operation_fingerprint == operation.fingerprint for event in events)
+
+
+def test_create_operation_rolls_back_snapshot_when_event_append_fails(
+    tmp_path, monkeypatch
+) -> None:
+    store = SQLiteExecutionStore(tmp_path / "execution.sqlite3")
+    operation = _test_operation()
+
+    def fail_event(*args, **kwargs):
+        raise sqlite3.IntegrityError("synthetic event failure")
+
+    monkeypatch.setattr(store, "_append_event_in_transaction", fail_event)
+
+    with pytest.raises(sqlite3.IntegrityError, match="synthetic event failure"):
+        ExecutionOperationService(store=store, clock=lambda: NOW).create_operation(
+            OperationRequest(operation=operation)
+        )
+
+    assert store.get_operation("tenant-1", "project-1", operation.operation_id) is None
+    assert store.get_status("tenant-1", "project-1", operation.operation_id) is None
+
+
+def test_recovery_resolution_updates_status_and_event_atomically(tmp_path) -> None:
+    database = tmp_path / "execution.sqlite3"
+    store = SQLiteExecutionStore(database)
+    service = ExecutionOperationService(store=store, clock=lambda: NOW)
+    operation = _test_operation()
+    service.create_operation(OperationRequest(operation=operation))
+    waiting = store.get_status("tenant-1", "project-1", operation.operation_id)
+    recovery_required = OperationStatusView.model_validate(
+        {
+            **waiting.model_dump(mode="python"),
+            "status": OperationStatus.RECOVERY_REQUIRED,
+            "recovery_state": RecoveryState.INTERRUPTED,
+            "fingerprint": "sha256:" + "0" * 64,
+        }
+    )
+    store.save_status(recovery_required)
+
+    resolved = service.apply_recovery_decision(
+        RecoveryDecision(
+            decision_id="recovery-test-1",
+            tenant_id=operation.tenant_id,
+            project_id=operation.project_id,
+            operation_id=operation.operation_id,
+            reviewer_id="reviewer-1",
+            decision="MARK_FAILED",
+            decided_at=NOW + timedelta(seconds=1),
+        )
+    )
+
+    assert resolved.status is OperationStatus.FAILED
+    assert resolved.recovery_state is RecoveryState.RECOVERED
+    with sqlite3.connect(database) as connection:
+        event = OperationEvent.model_validate_json(
+            connection.execute(
+                "SELECT body FROM v66_operation_events ORDER BY sequence DESC LIMIT 1"
+            ).fetchone()[0]
+        )
+    assert event.event_type is OperationEventType.RECOVERY_RESOLVED
+    assert event.recovery_state is RecoveryState.RECOVERED
 
 
 @pytest.mark.parametrize(

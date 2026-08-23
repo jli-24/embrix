@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -17,6 +18,8 @@ from embedded_copilot.execution_worker.contracts import (
     HilStep,
     HilStepKind,
     OperationApprovalGrant,
+    OperationEvent,
+    OperationEventType,
     OperationRequest,
     OperationType,
     OperationStatus,
@@ -294,7 +297,8 @@ def test_flash_like_running_state_recovers_to_unknown_target_state(tmp_path) -> 
 
 
 def test_worker_dispatches_test_after_running_and_writes_success_receipt(tmp_path) -> None:
-    store = SQLiteExecutionStore(tmp_path / "execution.sqlite3")
+    database = tmp_path / "execution.sqlite3"
+    store = SQLiteExecutionStore(database)
     target = _target()
     operation = _bind_target(_test_operation(), target)
     approval = _enqueue(store, operation)
@@ -320,6 +324,22 @@ def test_worker_dispatches_test_after_running_and_writes_success_receipt(tmp_pat
     assert receipt.tool_execution_status == "SUCCEEDED"
     assert receipt.target_runtime_verification_status == "NOT_VERIFIED"
     assert receipt.safe_diagnostics_summary == "synthetic test validation"
+    with sqlite3.connect(database) as connection:
+        events = tuple(
+            OperationEvent.model_validate_json(row[0])
+            for row in connection.execute(
+                "SELECT body FROM v66_operation_events ORDER BY sequence"
+            ).fetchall()
+        )
+    assert tuple(event.event_type for event in events) == (
+        OperationEventType.OPERATION_CREATED,
+        OperationEventType.APPROVAL_ISSUED,
+        OperationEventType.OPERATION_QUEUED,
+        OperationEventType.OPERATION_CLAIMED,
+        OperationEventType.OPERATION_STARTED,
+        OperationEventType.OPERATION_SUCCEEDED,
+    )
+    assert events[-1].receipt_fingerprint == receipt.fingerprint
     assert store.consume_approval(
         tenant_id="tenant-1",
         project_id="project-1",
@@ -354,6 +374,40 @@ def test_worker_default_test_adapter_writes_unavailable_receipt_and_fails_closed
     assert receipt.artifact is None
     assert receipt.evidence_references == ()
     assert "pass" not in receipt.safe_diagnostics_summary.casefold()
+
+
+def test_terminal_transition_rolls_back_receipt_and_status_when_event_fails(
+    tmp_path, monkeypatch
+) -> None:
+    database = tmp_path / "execution.sqlite3"
+    store = SQLiteExecutionStore(database)
+    target = _target()
+    operation = _bind_target(_test_operation(), target)
+    _enqueue(store, operation)
+    original = store._append_event_in_transaction
+
+    def fail_terminal(connection, **kwargs):
+        if kwargs["event_type"] is OperationEventType.OPERATION_SUCCEEDED:
+            raise sqlite3.IntegrityError("synthetic terminal event failure")
+        return original(connection, **kwargs)
+
+    monkeypatch.setattr(store, "_append_event_in_transaction", fail_terminal)
+    worker = ExecutionWorker(
+        worker_id="worker-test-rollback",
+        store=store,
+        registry=ExecutionToolRegistry(TrustedToolDiscovery()),
+        workspace_resolver=_Workspace(),
+        targets=_Targets(target),
+        test=_Test(store),
+    )
+
+    with pytest.raises(sqlite3.IntegrityError, match="synthetic terminal event failure"):
+        worker.run_once()
+
+    status = store.get_status("tenant-1", "project-1", operation.operation_id)
+    assert status is not None
+    assert status.status is OperationStatus.RUNNING
+    assert store.get_receipt("tenant-1", "project-1", operation.operation_id) is None
 
 
 def test_worker_rejects_cross_purpose_test_approval_before_running(tmp_path) -> None:
