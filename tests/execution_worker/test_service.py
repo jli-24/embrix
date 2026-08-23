@@ -194,6 +194,27 @@ def test_create_operation_rolls_back_snapshot_when_event_append_fails(
     assert store.get_status("tenant-1", "project-1", operation.operation_id) is None
 
 
+def test_idempotent_create_rejects_same_type_with_changed_payload(tmp_path) -> None:
+    store = SQLiteExecutionStore(tmp_path / "execution.sqlite3")
+    service = ExecutionOperationService(store=store, clock=lambda: NOW)
+    operation = _test_operation()
+    service.create_operation(OperationRequest(operation=operation))
+    changed = ExecutionTestOperation.model_validate(
+        {
+            **operation.model_dump(mode="python"),
+            "nonce": "nonce-test-changed",
+            "fingerprint": "sha256:" + "0" * 64,
+        }
+    )
+
+    with pytest.raises(ExecutionRejected, match="identity conflict"):
+        service.create_operation(OperationRequest(operation=changed))
+
+    assert store.get_operation(
+        operation.tenant_id, operation.project_id, operation.operation_id
+    ) == operation
+
+
 def test_recovery_resolution_updates_status_and_event_atomically(tmp_path) -> None:
     database = tmp_path / "execution.sqlite3"
     store = SQLiteExecutionStore(database)

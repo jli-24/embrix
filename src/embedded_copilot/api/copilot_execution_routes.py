@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from embedded_copilot.api.desktop_identity import TrustedDesktopIdentity, desktop_identity
 from embedded_copilot.execution_worker.contracts import (
-    BuildOperation, FlashOperation, HilOperation, OperationRequest, TestOperation, UartObservationOperation,
+    BuildOperation, FlashOperation, HilOperation, OperationEvent, OperationRequest, TestOperation, UartObservationOperation,
     ToolchainIdentity, CancellationRequest, OperationType,
 )
 
@@ -47,10 +47,9 @@ def _base(body: Any, identity: TrustedDesktopIdentity) -> dict[str, Any]:
     return {key: value for key, value in {**body.model_dump(mode="python"), "tenant_id": identity.tenant_id, "requester_id": identity.requester}.items() if key != "target_kind"}
 
 
-def _event_stream(events) -> StreamingResponse:
+def _event_stream(projections) -> StreamingResponse:
     def frames():
-        for event in events:
-            projection = event_response(event)
+        for projection in projections:
             data = json.dumps(
                 projection.model_dump(mode="json"),
                 ensure_ascii=False,
@@ -216,7 +215,15 @@ def stream_operation_events(
             last_event_id=last_event_id,
             limit=100,
         )
-        return _resync_stream() if events is None else _event_stream(events)
+        if events is None:
+            return _resync_stream()
+        projections = []
+        for value in events:
+            event = OperationEvent.model_validate(value.model_dump(mode="python"))
+            if event.tenant_id != identity.tenant_id or event.project_id != project_id:
+                raise ValueError("operation event scope mismatch")
+            projections.append(event_response(event))
+        return _event_stream(tuple(projections))
     except Exception:
         return _error(request, 422, "EXECUTION_EVENT_STREAM_REJECTED")
 

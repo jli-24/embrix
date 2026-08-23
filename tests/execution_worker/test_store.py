@@ -312,6 +312,9 @@ def test_event_cursor_is_scope_bound_and_tampered_rows_fail_closed(tmp_path) -> 
     assert store.read_operation_events_after(
         "tenant-1", "project-1", last_event_id="operation-event-unknown"
     ) is None
+    assert store.read_operation_events_after(
+        "tenant-1", "project-1", last_event_id="../tampered-cursor"
+    ) is None
 
     with sqlite3.connect(database) as connection:
         payload = json.loads(

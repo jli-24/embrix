@@ -206,11 +206,11 @@ def test_existing_execution_routes_remain_registered() -> None:
         assert f"/api/v1/copilot/operations/{operation}" in paths
 
 
-def _operation_event(*, event_id: str, sequence: int, event_type, status):
+def _operation_event(*, event_id: str, sequence: int, event_type, status, tenant_id: str = "tenant-1"):
     return OperationEvent(
         event_id=event_id,
         sequence=sequence,
-        tenant_id="tenant-1",
+        tenant_id=tenant_id,
         project_id="project-1",
         operation_id="operation-test-1",
         operation_fingerprint=FP,
@@ -286,3 +286,26 @@ def test_execution_event_stream_is_unavailable_without_composed_port() -> None:
 
     assert response.status_code == 503
     assert response.json()["error"] == "EXECUTION_UNAVAILABLE"
+
+
+def test_execution_event_stream_rejects_port_output_from_another_scope() -> None:
+    port = _Port()
+    port.events = (
+        _operation_event(
+            event_id="operation-event-foreign-scope",
+            sequence=1,
+            event_type=OperationEventType.OPERATION_STARTED,
+            status=OperationStatus.RUNNING,
+            tenant_id="tenant-other",
+        ),
+    )
+
+    with TestClient(_app(port)) as client:
+        response = client.get(
+            "/api/v1/copilot/operations/events/stream?project_id=project-1",
+            headers=HEADERS,
+        )
+
+    assert response.status_code == 422
+    assert response.json()["error"] == "EXECUTION_EVENT_STREAM_REJECTED"
+    assert "operation-event-foreign-scope" not in response.text

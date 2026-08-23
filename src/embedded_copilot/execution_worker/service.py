@@ -63,7 +63,13 @@ class ExecutionOperationService:
             raise ExecutionRejected("project is tombstoned")
         existing = self._store.get_status(operation.tenant_id, operation.project_id, operation.operation_id)
         if existing is not None:
-            if existing.operation_type is not operation.operation_type:
+            persisted = self._store.get_operation(
+                operation.tenant_id, operation.project_id, operation.operation_id
+            )
+            if (
+                existing.operation_type is not operation.operation_type
+                or persisted != operation
+            ):
                 raise ExecutionRejected("operation identity conflict")
             return request
         now = self._clock()

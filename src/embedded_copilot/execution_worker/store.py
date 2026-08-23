@@ -233,7 +233,10 @@ class SQLiteExecutionStore:
         with self._lock, self._connect() as connection:
             after_sequence = 0
             if last_event_id is not None:
-                last_event_id = identifier(last_event_id, field="last_event_id")
+                try:
+                    last_event_id = identifier(last_event_id, field="last_event_id")
+                except (TypeError, ValueError):
+                    return None
                 cursor = connection.execute(
                     "SELECT sequence FROM v66_operation_events WHERE tenant_id=? AND project_id=? AND event_id=?",
                     (tenant_id, project_id, last_event_id),
