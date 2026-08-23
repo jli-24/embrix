@@ -4,7 +4,12 @@ import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
+import pytest
+from pydantic import ValidationError
+
 from embedded_copilot.execution_worker.contracts import (
+    OperationEvent,
+    OperationEventType,
     OperationStatus,
     OperationStatusView,
     OperationType,
@@ -119,3 +124,115 @@ def test_running_test_recovers_as_interrupted_without_retry(tmp_path) -> None:
     assert type(
         restarted.get_operation("tenant-1", "project-1", operation.operation_id)
     ) is ExecutionTestOperation
+
+
+def test_event_table_is_added_to_existing_v66_database(tmp_path) -> None:
+    database = tmp_path / "execution.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE v66_objects (kind TEXT NOT NULL, tenant_id TEXT NOT NULL, "
+            "project_id TEXT NOT NULL, object_id TEXT NOT NULL, body TEXT NOT NULL, "
+            "PRIMARY KEY(kind, tenant_id, project_id, object_id))"
+        )
+
+    SQLiteExecutionStore(database)
+
+    with sqlite3.connect(database) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    assert "v66_operation_events" in tables
+
+
+def test_append_event_allocates_project_scoped_sequence_and_canonical_body(tmp_path) -> None:
+    database = tmp_path / "execution.sqlite3"
+    store = SQLiteExecutionStore(database)
+    operation = _operation()
+    other_project = ExecutionTestOperation.model_validate(
+        {
+            **operation.model_dump(mode="python"),
+            "operation_id": "operation-other-project",
+            "project_id": "project-2",
+            "nonce": "nonce-other-project",
+            "fingerprint": "sha256:" + "0" * 64,
+        }
+    )
+
+    first = store._append_event(
+        operation=operation,
+        event_type=OperationEventType.OPERATION_CREATED,
+        status=OperationStatus.WAIT_APPROVAL,
+        recovery_state=RecoveryState.NONE,
+        reason_code="AWAITING_EXPLICIT_APPROVAL",
+        occurred_at=NOW,
+        event_id="operation-event-1",
+    )
+    second = store._append_event(
+        operation=operation,
+        event_type=OperationEventType.APPROVAL_ISSUED,
+        status=OperationStatus.WAIT_APPROVAL,
+        recovery_state=RecoveryState.NONE,
+        reason_code="APPROVAL_ISSUED",
+        occurred_at=NOW + timedelta(seconds=1),
+        event_id="operation-event-2",
+    )
+    isolated = store._append_event(
+        operation=other_project,
+        event_type=OperationEventType.OPERATION_CREATED,
+        status=OperationStatus.WAIT_APPROVAL,
+        recovery_state=RecoveryState.NONE,
+        reason_code="AWAITING_EXPLICIT_APPROVAL",
+        occurred_at=NOW,
+        event_id="operation-event-1",
+    )
+
+    assert (first.sequence, second.sequence, isolated.sequence) == (1, 2, 1)
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute(
+            "SELECT body FROM v66_operation_events WHERE tenant_id=? AND project_id=? "
+            "ORDER BY sequence",
+            (operation.tenant_id, operation.project_id),
+        ).fetchall()
+    restored = tuple(OperationEvent.model_validate_json(row[0]) for row in rows)
+    assert restored == (first, second)
+    assert not _all_mapping_keys(json.loads(rows[0][0])).intersection(
+        {"command", "executable", "cwd", "environment", "script", "shell", "path"}
+    )
+
+
+def test_event_log_rejects_duplicate_identity_and_tampered_body(tmp_path) -> None:
+    database = tmp_path / "execution.sqlite3"
+    store = SQLiteExecutionStore(database)
+    operation = _operation()
+    store._append_event(
+        operation=operation,
+        event_type=OperationEventType.OPERATION_CREATED,
+        status=OperationStatus.WAIT_APPROVAL,
+        recovery_state=RecoveryState.NONE,
+        reason_code="AWAITING_EXPLICIT_APPROVAL",
+        occurred_at=NOW,
+        event_id="operation-event-1",
+    )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        store._append_event(
+            operation=operation,
+            event_type=OperationEventType.APPROVAL_ISSUED,
+            status=OperationStatus.WAIT_APPROVAL,
+            recovery_state=RecoveryState.NONE,
+            reason_code="APPROVAL_ISSUED",
+            occurred_at=NOW,
+            event_id="operation-event-1",
+        )
+
+    with sqlite3.connect(database) as connection:
+        raw = connection.execute(
+            "SELECT body FROM v66_operation_events WHERE event_id='operation-event-1'"
+        ).fetchone()[0]
+    payload = json.loads(raw)
+    payload["reason_code"] = "TAMPERED"
+    with pytest.raises(ValidationError, match="fingerprint mismatch"):
+        OperationEvent.model_validate_json(json.dumps(payload))

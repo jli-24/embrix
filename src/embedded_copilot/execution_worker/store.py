@@ -6,6 +6,7 @@ import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeVar
+from uuid import uuid4
 
 from .contracts import (
     ApprovalStatus,
@@ -16,6 +17,8 @@ from .contracts import (
     FlashOperation,
     FingerprintedContract,
     HilOperation,
+    OperationEvent,
+    OperationEventType,
     OperationApprovalGrant,
     OperationReceipt,
     OperationStatus,
@@ -72,6 +75,20 @@ class SQLiteExecutionStore:
                     tombstoned_at TEXT NOT NULL,
                     PRIMARY KEY(tenant_id, project_id)
                 );
+                CREATE TABLE IF NOT EXISTS v66_operation_events (
+                    tenant_id TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL CHECK(sequence > 0),
+                    event_id TEXT NOT NULL,
+                    operation_id TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    PRIMARY KEY(tenant_id, project_id, sequence),
+                    UNIQUE(tenant_id, project_id, event_id)
+                );
+                CREATE INDEX IF NOT EXISTS v66_operation_events_by_operation
+                ON v66_operation_events(
+                    tenant_id, project_id, operation_id, sequence
+                );
                 """
             )
 
@@ -90,6 +107,89 @@ class SQLiteExecutionStore:
                 (kind, getattr(value, "tenant_id"), getattr(value, "project_id"), object_id, self._body(value)),
             )
         return value
+
+    def _append_event_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        operation: Any,
+        event_type: OperationEventType,
+        status: OperationStatus,
+        recovery_state: RecoveryState,
+        reason_code: str,
+        occurred_at: datetime,
+        approval_id: str | None = None,
+        receipt_fingerprint: str | None = None,
+        event_id: str | None = None,
+    ) -> OperationEvent:
+        row = connection.execute(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence "
+            "FROM v66_operation_events WHERE tenant_id=? AND project_id=?",
+            (operation.tenant_id, operation.project_id),
+        ).fetchone()
+        event = OperationEvent(
+            event_id=event_id or f"operation-event-{uuid4().hex}",
+            sequence=int(row["next_sequence"]),
+            tenant_id=operation.tenant_id,
+            project_id=operation.project_id,
+            operation_id=operation.operation_id,
+            operation_fingerprint=operation.fingerprint,
+            operation_type=operation.operation_type,
+            event_type=event_type,
+            status=status,
+            recovery_state=recovery_state,
+            approval_id=approval_id,
+            receipt_fingerprint=receipt_fingerprint,
+            reason_code=reason_code,
+            occurred_at=occurred_at,
+        )
+        connection.execute(
+            "INSERT INTO v66_operation_events(tenant_id, project_id, sequence, event_id, operation_id, body) "
+            "VALUES(?,?,?,?,?,?)",
+            (
+                event.tenant_id,
+                event.project_id,
+                event.sequence,
+                event.event_id,
+                event.operation_id,
+                self._body(event),
+            ),
+        )
+        return event
+
+    def _append_event(
+        self,
+        *,
+        operation: Any,
+        event_type: OperationEventType,
+        status: OperationStatus,
+        recovery_state: RecoveryState,
+        reason_code: str,
+        occurred_at: datetime,
+        approval_id: str | None = None,
+        receipt_fingerprint: str | None = None,
+        event_id: str | None = None,
+    ) -> OperationEvent:
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                event = self._append_event_in_transaction(
+                    connection,
+                    operation=operation,
+                    event_type=event_type,
+                    status=status,
+                    recovery_state=recovery_state,
+                    reason_code=reason_code,
+                    occurred_at=occurred_at,
+                    approval_id=approval_id,
+                    receipt_fingerprint=receipt_fingerprint,
+                    event_id=event_id,
+                )
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+            connection.execute("COMMIT")
+        return event
 
     def _get(self, kind: str, tenant_id: str, project_id: str, object_id: str, model: type[T]) -> T | None:
         with self._lock, self._connect() as connection:
