@@ -130,6 +130,22 @@ class RecoveryState(StrEnum):
     RECOVERED = "RECOVERED"
 
 
+class OperationEventType(StrEnum):
+    OPERATION_CREATED = "OPERATION_CREATED"
+    APPROVAL_ISSUED = "APPROVAL_ISSUED"
+    OPERATION_QUEUED = "OPERATION_QUEUED"
+    OPERATION_CLAIMED = "OPERATION_CLAIMED"
+    OPERATION_STARTED = "OPERATION_STARTED"
+    CANCELLATION_REQUESTED = "CANCELLATION_REQUESTED"
+    CANCELLATION_PENDING = "CANCELLATION_PENDING"
+    OPERATION_SUCCEEDED = "OPERATION_SUCCEEDED"
+    OPERATION_FAILED = "OPERATION_FAILED"
+    OPERATION_CANCELLED = "OPERATION_CANCELLED"
+    OPERATION_TIMED_OUT = "OPERATION_TIMED_OUT"
+    RECOVERY_REQUIRED = "RECOVERY_REQUIRED"
+    RECOVERY_RESOLVED = "RECOVERY_RESOLVED"
+
+
 class TargetBindingStatus(StrEnum):
     DISCOVERED = "DISCOVERED"
     CANDIDATE = "CANDIDATE"
@@ -449,6 +465,49 @@ class OperationStatusView(FingerprintedContract):
     _fps = field_validator("receipt_fingerprint", mode="before")(lambda value: None if value is None else fingerprint(value, field="receipt_fingerprint"))
     _time = field_validator("updated_at", mode="before")(lambda value: utc_datetime(value, field="updated_at"))
     _detail = field_validator("safe_detail", mode="before")(lambda value: safe_text(value, field="safe_detail", maximum=512) if value else "")
+
+
+class OperationEvent(FingerprintedContract):
+    """Immutable lifecycle observation for one controlled operation."""
+
+    event_id: str
+    sequence: int = Field(ge=1)
+    tenant_id: str
+    project_id: str
+    operation_id: str
+    operation_fingerprint: str
+    operation_type: OperationType
+    event_type: OperationEventType
+    status: OperationStatus
+    recovery_state: RecoveryState
+    approval_id: str | None = None
+    receipt_fingerprint: str | None = None
+    reason_code: str
+    occurred_at: datetime
+
+    _ids = field_validator(
+        "event_id",
+        "tenant_id",
+        "project_id",
+        "operation_id",
+        "approval_id",
+        "reason_code",
+        mode="before",
+    )(
+        lambda value, info: None
+        if value is None
+        else identifier(value, field=info.field_name)
+    )
+    _fps = field_validator(
+        "operation_fingerprint", "receipt_fingerprint", mode="before"
+    )(
+        lambda value, info: None
+        if value is None
+        else fingerprint(value, field=info.field_name)
+    )
+    _time = field_validator("occurred_at", mode="before")(
+        lambda value: utc_datetime(value, field="occurred_at")
+    )
 
 
 class OperationReceipt(FingerprintedContract):

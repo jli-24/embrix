@@ -15,6 +15,10 @@ from embedded_copilot.execution_worker.contracts import (
     HilStep,
     HilStepKind,
     OperationApprovalGrant,
+    OperationEvent,
+    OperationEventType,
+    OperationStatus,
+    RecoveryState,
     OperationType,
     OperationRequest,
     TargetBindingStatus,
@@ -201,3 +205,67 @@ def test_hil_steps_are_declarative_and_reject_script_shape() -> None:
     assert len(scenario.steps) == 2
     with pytest.raises(ValidationError):
         HilStep.model_validate({"kind": "WAIT_DURATION", "script": "python test.py", "duration_seconds": 1})
+
+
+def test_operation_event_is_strict_frozen_and_fingerprinted() -> None:
+    operation = _test_operation()
+    event = OperationEvent(
+        event_id="operation-event-1",
+        sequence=1,
+        tenant_id=operation.tenant_id,
+        project_id=operation.project_id,
+        operation_id=operation.operation_id,
+        operation_fingerprint=operation.fingerprint,
+        operation_type=operation.operation_type,
+        event_type=OperationEventType.OPERATION_CREATED,
+        status=OperationStatus.WAIT_APPROVAL,
+        recovery_state=RecoveryState.NONE,
+        approval_id=None,
+        receipt_fingerprint=None,
+        reason_code="AWAITING_EXPLICIT_APPROVAL",
+        occurred_at=NOW,
+    )
+
+    assert event.sequence == 1
+    assert event.occurred_at.tzinfo is UTC
+    assert event.fingerprint.startswith("sha256:")
+    with pytest.raises(ValidationError):
+        event.reason_code = "changed"
+    with pytest.raises(ValidationError):
+        OperationEvent.model_validate(
+            {**event.model_dump(mode="python"), "fingerprint": "sha256:" + "9" * 64}
+        )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    (
+        {"sequence": 0},
+        {"occurred_at": datetime(2026, 1, 1)},
+        {"command": "pytest -q"},
+        {"environment": {"PATH": "private"}},
+        {"path": "C:/private/project"},
+    ),
+)
+def test_operation_event_rejects_invalid_or_execution_shaped_fields(changes) -> None:
+    operation = _test_operation()
+    values = {
+        "event_id": "operation-event-1",
+        "sequence": 1,
+        "tenant_id": operation.tenant_id,
+        "project_id": operation.project_id,
+        "operation_id": operation.operation_id,
+        "operation_fingerprint": operation.fingerprint,
+        "operation_type": operation.operation_type,
+        "event_type": OperationEventType.OPERATION_CREATED,
+        "status": OperationStatus.WAIT_APPROVAL,
+        "recovery_state": RecoveryState.NONE,
+        "approval_id": None,
+        "receipt_fingerprint": None,
+        "reason_code": "AWAITING_EXPLICIT_APPROVAL",
+        "occurred_at": NOW,
+    }
+    values.update(changes)
+
+    with pytest.raises(ValidationError):
+        OperationEvent.model_validate(values)
