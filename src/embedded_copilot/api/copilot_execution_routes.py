@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, Header, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from embedded_copilot.api.desktop_identity import TrustedDesktopIdentity, desktop_identity
 from embedded_copilot.execution_worker.contracts import (
@@ -16,7 +17,7 @@ from embedded_copilot.execution_worker.contracts import (
 from .copilot_execution_models import (
     BuildOperationCreateRequest, FlashOperationCreateRequest, HilOperationCreateRequest,
     OperationApprovalRequest, OperationCancelRequest, TestOperationCreateRequest, UartOperationCreateRequest,
-    approval_response, status_response,
+    approval_response, event_response, status_response,
 )
 
 
@@ -27,6 +28,7 @@ class ExecutionOperationPort(Protocol):
     def request_cancellation(self, request: CancellationRequest) -> Any: ...
     def get_status(self, **kwargs: Any) -> Any: ...
     def get_artifact(self, **kwargs: Any) -> Any: ...
+    def read_operation_events_after(self, **kwargs: Any) -> Any: ...
 
 
 router = APIRouter(prefix="/api/v1/copilot/operations", tags=["controlled-execution"])
@@ -43,6 +45,33 @@ def _port(request: Request) -> ExecutionOperationPort | None:
 
 def _base(body: Any, identity: TrustedDesktopIdentity) -> dict[str, Any]:
     return {key: value for key, value in {**body.model_dump(mode="python"), "tenant_id": identity.tenant_id, "requester_id": identity.requester}.items() if key != "target_kind"}
+
+
+def _event_stream(events) -> StreamingResponse:
+    def frames():
+        for event in events:
+            projection = event_response(event)
+            data = json.dumps(
+                projection.model_dump(mode="json"),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            yield f"id: {projection.event_id}\nevent: {projection.event_type}\ndata: {data}\n\n"
+
+    return StreamingResponse(
+        frames(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+def _resync_stream() -> StreamingResponse:
+    return StreamingResponse(
+        iter(('event: RESYNC_REQUIRED\ndata: {"reason_code":"RESYNC_REQUIRED"}\n\n',)),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("/build")
@@ -168,6 +197,28 @@ def cancel_operation(operation_id: str, project_id: str, body: OperationCancelRe
         return status_response(status)
     except Exception:
         return _error(request, 422, "CANCELLATION_REJECTED")
+
+
+@router.get("/events/stream")
+def stream_operation_events(
+    project_id: str,
+    request: Request,
+    identity: TrustedDesktopIdentity = Depends(desktop_identity),
+    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+):
+    port = _port(request)
+    if port is None:
+        return _error(request, 503, "EXECUTION_UNAVAILABLE")
+    try:
+        events = port.read_operation_events_after(
+            tenant_id=identity.tenant_id,
+            project_id=project_id,
+            last_event_id=last_event_id,
+            limit=100,
+        )
+        return _resync_stream() if events is None else _event_stream(events)
+    except Exception:
+        return _error(request, 422, "EXECUTION_EVENT_STREAM_REJECTED")
 
 
 @router.get("/{operation_id}/status")

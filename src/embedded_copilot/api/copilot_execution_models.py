@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from embedded_copilot.execution_worker.contracts import (
     ArtifactIdentity,
     HilScenario,
+    OperationEvent,
     OperationStatusView,
     OperationApprovalGrant,
     safe_text,
@@ -161,6 +162,24 @@ class OperationApprovalResponse(ExecutionApiContract):
     fingerprint: str
 
 
+class OperationEventResponse(ExecutionApiContract):
+    event_id: str
+    sequence: int
+    tenant_id: str
+    project_id: str
+    operation_id: str
+    operation_fingerprint: str
+    operation_type: str
+    event_type: str
+    status: str
+    recovery_state: str
+    approval_id: str | None
+    receipt_fingerprint: str | None
+    reason_code: str
+    occurred_at: datetime
+    fingerprint: str
+
+
 def status_response(
     value: OperationStatusView,
     *,
@@ -186,9 +205,29 @@ def approval_response(value: OperationApprovalGrant) -> OperationApprovalRespons
     )
 
 
+def event_response(value: OperationEvent) -> OperationEventResponse:
+    return OperationEventResponse(
+        event_id=value.event_id,
+        sequence=value.sequence,
+        tenant_id=value.tenant_id,
+        project_id=value.project_id,
+        operation_id=value.operation_id,
+        operation_fingerprint=value.operation_fingerprint,
+        operation_type=value.operation_type.value,
+        event_type=value.event_type.value,
+        status=value.status.value,
+        recovery_state=value.recovery_state.value,
+        approval_id=value.approval_id,
+        receipt_fingerprint=value.receipt_fingerprint,
+        reason_code=value.reason_code,
+        occurred_at=value.occurred_at,
+        fingerprint=value.fingerprint,
+    )
+
+
 __all__ = (
     "BuildOperationCreateRequest", "FlashOperationCreateRequest", "HilOperationCreateRequest",
     "OperationApprovalRequest", "OperationApprovalResponse", "OperationCancelRequest",
-    "OperationStatusResponse", "TestOperationCreateRequest", "UartOperationCreateRequest",
-    "approval_response", "status_response",
+    "OperationEventResponse", "OperationStatusResponse", "TestOperationCreateRequest", "UartOperationCreateRequest",
+    "approval_response", "event_response", "status_response",
 )

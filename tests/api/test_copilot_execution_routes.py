@@ -7,7 +7,14 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from embedded_copilot.api.copilot_execution_routes import router
-from embedded_copilot.execution_worker.contracts import OperationStatus, OperationStatusView, RecoveryState
+from embedded_copilot.execution_worker.contracts import (
+    OperationEvent,
+    OperationEventType,
+    OperationStatus,
+    OperationStatusView,
+    OperationType,
+    RecoveryState,
+)
 
 
 HEADERS = {"X-Copilot-Requester": "engineer-1", "X-Environment-Tenant": "tenant-1"}
@@ -17,6 +24,8 @@ FP = "sha256:" + "4" * 64
 class _Port:
     def __init__(self) -> None:
         self.operations = {}
+        self.events = ()
+        self.event_reads = []
 
     def create_operation(self, request):
         operation = request.operation
@@ -25,6 +34,14 @@ class _Port:
     def get_status(self, *, tenant_id, project_id, operation_id):
         operation = self.operations[operation_id]
         return OperationStatusView(operation_id=operation_id, tenant_id=tenant_id, project_id=project_id, operation_type=operation.operation_type, status=OperationStatus.WAIT_APPROVAL, approval_id=None, worker_id=None, recovery_state=RecoveryState.NONE, cancellation_requested=False, updated_at=datetime.now(UTC), safe_detail="awaiting approval")
+
+    def read_operation_events_after(
+        self, *, tenant_id, project_id, last_event_id, limit
+    ):
+        self.event_reads.append((tenant_id, project_id, last_event_id, limit))
+        if last_event_id == "operation-event-foreign":
+            return None
+        return self.events
 
 
 def _app(port=None):
@@ -187,3 +204,85 @@ def test_existing_execution_routes_remain_registered() -> None:
 
     for operation in ("build", "flash", "uart", "hil"):
         assert f"/api/v1/copilot/operations/{operation}" in paths
+
+
+def _operation_event(*, event_id: str, sequence: int, event_type, status):
+    return OperationEvent(
+        event_id=event_id,
+        sequence=sequence,
+        tenant_id="tenant-1",
+        project_id="project-1",
+        operation_id="operation-test-1",
+        operation_fingerprint=FP,
+        operation_type=OperationType.TEST,
+        event_type=event_type,
+        status=status,
+        recovery_state=RecoveryState.NONE,
+        approval_id="approval-test-1",
+        receipt_fingerprint=None,
+        reason_code=event_type.value,
+        occurred_at=datetime(2026, 1, 1, tzinfo=UTC) + timedelta(seconds=sequence),
+    )
+
+
+def test_execution_event_stream_replays_typed_sse_and_passes_cursor_scope() -> None:
+    port = _Port()
+    port.events = (
+        _operation_event(
+            event_id="operation-event-2",
+            sequence=2,
+            event_type=OperationEventType.OPERATION_QUEUED,
+            status=OperationStatus.QUEUED,
+        ),
+        _operation_event(
+            event_id="operation-event-3",
+            sequence=3,
+            event_type=OperationEventType.OPERATION_STARTED,
+            status=OperationStatus.RUNNING,
+        ),
+    )
+
+    with TestClient(_app(port)) as client:
+        response = client.get(
+            "/api/v1/copilot/operations/events/stream?project_id=project-1",
+            headers={**HEADERS, "Last-Event-ID": "operation-event-1"},
+        )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert "id: operation-event-2" in response.text
+    assert "event: OPERATION_QUEUED" in response.text
+    assert "event: OPERATION_STARTED" in response.text
+    assert '"operation_type":"TEST"' in response.text
+    assert '"reason_code":"OPERATION_STARTED"' in response.text
+    assert port.event_reads == [
+        ("tenant-1", "project-1", "operation-event-1", 100)
+    ]
+    for forbidden in ("command", "executable", "cwd", "environment", "shell", "path"):
+        assert forbidden not in response.text.casefold()
+
+
+def test_execution_event_stream_returns_resync_for_unknown_or_cross_scope_cursor() -> None:
+    port = _Port()
+
+    with TestClient(_app(port)) as client:
+        response = client.get(
+            "/api/v1/copilot/operations/events/stream?project_id=project-1",
+            headers={**HEADERS, "Last-Event-ID": "operation-event-foreign"},
+        )
+
+    assert response.status_code == 200
+    assert "event: RESYNC_REQUIRED" in response.text
+    assert '"reason_code":"RESYNC_REQUIRED"' in response.text
+    assert "operation-event-foreign" not in response.text
+
+
+def test_execution_event_stream_is_unavailable_without_composed_port() -> None:
+    with TestClient(_app()) as client:
+        response = client.get(
+            "/api/v1/copilot/operations/events/stream?project_id=project-1",
+            headers=HEADERS,
+        )
+
+    assert response.status_code == 503
+    assert response.json()["error"] == "EXECUTION_UNAVAILABLE"
