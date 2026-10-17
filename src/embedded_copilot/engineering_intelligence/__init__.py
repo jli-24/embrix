@@ -12,6 +12,7 @@ from .service import (
     KnowledgeReadPort,
     MemoryEvidencePort,
 )
+from .gate import EvidenceGate, EvidenceGateRejected, EvidenceGateResult
 
 __all__ = [
     *_contract_exports,
@@ -28,4 +29,7 @@ __all__ = [
     "EngineeringIntelligencePort",
     "KnowledgeReadPort",
     "MemoryEvidencePort",
+    "EvidenceGate",
+    "EvidenceGateRejected",
+    "EvidenceGateResult",
 ]

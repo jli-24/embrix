@@ -129,6 +129,10 @@ class PCBPin(_PCBStructureModel):
     number: str = Field(min_length=1)
     pad_type: str = Field(min_length=1)
     net_name: str | None = Field(default=None, min_length=1)
+    # Optional pad center in board coordinates.  Older parser callers may omit
+    # it and therefore remain component-center/unknown quality at higher
+    # projections.
+    position: PCBPosition | None = None
 
     @field_validator("number", "pad_type", "net_name", mode="before")
     @classmethod
@@ -138,7 +142,9 @@ class PCBPin(_PCBStructureModel):
 
 class PCBComponent(_PCBStructureModel):
     reference: str = Field(min_length=1)
-    value: str = ""
+    # KiCad board files may omit a footprint's displayed value.  Preserve the
+    # absence instead of converting it into an invented or invalid string.
+    value: str | None = None
     footprint: str = Field(min_length=1)
     library: str | None = Field(default=None, min_length=1)
     position: PCBPosition
@@ -263,6 +269,7 @@ class PCBZone(_PCBStructureModel):
     name: str | None = Field(default=None, min_length=1)
     net_name: str | None = Field(default=None, min_length=1)
     layers: tuple[str, ...]
+    polygon_points: tuple[tuple[float, float], ...] = ()
 
     @field_validator("name", "net_name", mode="before")
     @classmethod
@@ -272,6 +279,11 @@ class PCBZone(_PCBStructureModel):
     @field_validator("layers", mode="before")
     @classmethod
     def isolate_layers(cls, value: object) -> object:
+        return _isolate_tuple(value)
+
+    @field_validator("polygon_points", mode="before")
+    @classmethod
+    def isolate_polygon_points(cls, value: object) -> object:
         return _isolate_tuple(value)
 
     @model_validator(mode="after")

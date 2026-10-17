@@ -58,6 +58,9 @@ class DeterministicRelationProjector:
                         relation_type=relation_type,
                         confidence=memory.confidence,
                         source_memory_id=memory.memory_id,
+                        provenance=memory.source_reference,
+                        evidence=memory.evidence,
+                        verification_status=memory.status,
                     )
                 )
         ordered = tuple(

@@ -4,6 +4,7 @@ import copy
 
 from .contracts import (
     FirmwareBuildPort,
+    BuildReadinessResult,
     FirmwareBuildRequest,
     FirmwareBuildResult,
     FirmwareDebugAnalyzerPort,
@@ -25,6 +26,7 @@ from .exceptions import (
 )
 from .contracts import FirmwareBuildStatus
 from .models import identifier
+from .readiness import evaluate_build_readiness
 
 
 class FirmwareEngineeringService:
@@ -79,6 +81,15 @@ class FirmwareBuildService:
             raise
         except Exception as error:
             raise BuildFailed() from error
+
+    def readiness(self, request: FirmwareBuildRequest, *, workspace_root: object | None = None, tool: object | None = None) -> BuildReadinessResult:
+        """Expose the deterministic preflight without granting execution authority."""
+
+        return evaluate_build_readiness(
+            validate_build_request(request),
+            workspace_root=workspace_root,
+            tool=tool,
+        )
 
     def get_snapshot(self, project_id: str) -> FirmwareBuildResult | None:
         if self._port is None:

@@ -1,0 +1,17 @@
+{
+  "kind": "SYNTHETIC_R1_COMPATIBILITY_FIXTURE",
+  "real_engineering_evidence": false,
+  "writer_runtime_sha256": "838c65e1aa3b64e31926aef0a3ef158da73eb6b32c342641fc17ec6c03054b34",
+  "fixtures": [
+    {
+      "filename": "r1-catalog-standalone.json",
+      "sha256": "3ba7eec774fc1f5c618d21a11c9bb2b9fe87883e7bc9a002f0eca1b9f2ebf79b",
+      "byte_size": 11410
+    },
+    {
+      "filename": "r1-catalog-composite.json",
+      "sha256": "bb5f8309b9b5f460f764536fe0f5f417bd0a2b90e3c18b5b777fa395e9d1a478",
+      "byte_size": 49009
+    }
+  ]
+}

@@ -1,19 +1,19 @@
 from __future__ import annotations
 
-import copy
-from datetime import datetime
-from enum import StrEnum
-from typing import Protocol, runtime_checkable
+import hashlib
+import json
+import re
+import unicodedata
+from datetime import UTC, datetime
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-from .models import (
-    canonical_fingerprint,
-    fingerprint,
-    identifier,
-    safe_text,
-    tuple_only,
-    utc_datetime,
+_AUTO = "sha256:" + "0" * 64
+_FP = re.compile(r"^sha256:[a-f0-9]{64}$")
+_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:#/+-]{0,127}$")
+_UNSAFE = re.compile(
+    r"(?:api[_ -]?key|token|password|credential|secret|prompt|hidden reasoning|chain of thought|raw log|source code|binary|patch|diff|command|shell|build instruction|flash instruction|file://|https?://|\\\\|\x00|\r|\n)",
+    re.IGNORECASE,
 )
 
 
@@ -24,185 +24,110 @@ class OptimizationContract(BaseModel):
         extra="forbid",
         hide_input_in_errors=True,
         revalidate_instances="always",
+        validate_default=True,
     )
 
 
-class OptimizationCategory(StrEnum):
-    POWER = "POWER"
-    PERFORMANCE = "PERFORMANCE"
-    MEMORY = "MEMORY"
-    LATENCY = "LATENCY"
-    COMMUNICATION = "COMMUNICATION"
-    RELIABILITY = "RELIABILITY"
+def safe_text(value: object, *, field: str, maximum: int = 1024) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{field} is invalid")
+    checked = unicodedata.normalize("NFC", value).strip()
+    if not checked or len(checked) > maximum or _UNSAFE.search(checked):
+        raise ValueError(f"{field} is unsafe")
+    return checked
 
 
-class OptimizationConfidence(StrEnum):
-    VERIFIED = "VERIFIED"
-    PROJECTED = "PROJECTED"
-    UNVERIFIED = "UNVERIFIED"
+def identifier(value: object, *, field: str) -> str:
+    checked = safe_text(value, field=field, maximum=128)
+    if _ID.fullmatch(checked) is None:
+        raise ValueError(f"{field} is invalid")
+    return checked
 
 
-class OptimizationStatus(StrEnum):
-    IDENTIFIED = "IDENTIFIED"
-    REVIEW_REQUIRED = "REVIEW_REQUIRED"
-    APPROVED = "APPROVED"
-    REJECTED = "REJECTED"
+def fingerprint(value: object, *, field: str = "fingerprint") -> str:
+    if not isinstance(value, str) or _FP.fullmatch(value) is None:
+        raise ValueError(f"{field} is invalid")
+    return value
 
 
-class OptimizationTarget(StrEnum):
-    FIRMWARE = "FIRMWARE"
-    HARDWARE = "HARDWARE"
-    BUILD = "BUILD"
-    CONFIGURATION = "CONFIGURATION"
-    TEST = "TEST"
+def utc_datetime(value: object, *, field: str) -> datetime:
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() is None
+    ):
+        raise ValueError(f"{field} is invalid")
+    return value.astimezone(UTC)
 
 
-class OptimizationFinding(OptimizationContract):
-    finding_id: str
-    category: OptimizationCategory
-    target: OptimizationTarget
-    current_state: str
-    suggested_direction: str
-    risk: str
-    confidence: OptimizationConfidence
-    evidence_reference: str
-    status: OptimizationStatus
-    fingerprint: str
+def tuple_only(value: object, *, field: str) -> tuple:
+    if type(value) is not tuple:
+        raise ValueError(f"{field} must be a tuple")
+    return value
 
-    @field_validator("finding_id", "evidence_reference", mode="before")
-    @classmethod
-    def validate_ids(cls, value: object, info) -> str:
-        return identifier(value, field=info.field_name)
 
-    @field_validator("current_state", "suggested_direction", "risk", mode="before")
-    @classmethod
-    def validate_text(cls, value: object, info) -> str:
-        return safe_text(value, field=info.field_name)
+def deterministic_id(prefix: str, *parts: str) -> str:
+    return (
+        f"{prefix}-" + hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:48]
+    )
+
+
+class FingerprintedOptimizationContract(OptimizationContract):
+    fingerprint: str = _AUTO
 
     @field_validator("fingerprint", mode="before")
     @classmethod
-    def validate_fp(cls, value: object) -> str:
+    def _fp(cls, value: object) -> str:
         return fingerprint(value)
 
     @model_validator(mode="after")
-    def verify(self) -> OptimizationFinding:
-        if self.fingerprint != canonical_fingerprint(
-            self, exclude={"fingerprint", "status"}
-        ):
-            raise ValueError("optimization finding fingerprint mismatch")
+    def _bind(self):
+        encoded = json.dumps(
+            self.model_dump(mode="json", exclude={"fingerprint"}),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        expected = "sha256:" + hashlib.sha256(encoded).hexdigest()
+        if self.fingerprint == _AUTO:
+            object.__setattr__(self, "fingerprint", expected)
+        elif self.fingerprint != expected:
+            raise ValueError("fingerprint mismatch")
         return self
 
-    @classmethod
-    def create(cls, **values: object) -> OptimizationFinding:
-        provisional = cls.model_construct(
-            **{**values, "fingerprint": "sha256:" + "0" * 64}
-        )
-        values["fingerprint"] = canonical_fingerprint(
-            provisional, exclude={"fingerprint", "status"}
-        )
-        return cls.model_validate(values)
+
+# The v2.6 FastAPI route imports these versioned compatibility contracts directly
+# from this module.  They deliberately do not enter the v4.6 package exports.
+from .legacy_v26 import (
+    OptimizationAnalysis as LegacyOptimizationAnalysis,
+)
+from .legacy_v26 import (
+    OptimizationApprovalRequest,
+)
+from .legacy_v26 import (
+    OptimizationCategory,
+    OptimizationStatus,
+    OptimizationTarget,
+)
+from .legacy_v26 import (
+    OptimizationAnalysisPort as LegacyOptimizationAnalysisPort,
+)
+from .legacy_v26 import (
+    OptimizationConfidence as LegacyOptimizationConfidence,
+)
+from .legacy_v26 import (
+    OptimizationFinding as LegacyOptimizationFinding,
+)
+from .legacy_v26 import (
+    validate_analysis,
+    validate_finding,
+)
+
+OptimizationAnalysis = LegacyOptimizationAnalysis
+OptimizationAnalysisPort = LegacyOptimizationAnalysisPort
+OptimizationConfidence = LegacyOptimizationConfidence
+OptimizationFinding = LegacyOptimizationFinding
 
 
-class OptimizationAnalysis(OptimizationContract):
-    project_id: str
-    findings: tuple[OptimizationFinding, ...] = Field(max_length=128)
-    fingerprint: str
-
-    @field_validator("project_id", mode="before")
-    @classmethod
-    def validate_project(cls, value: object) -> str:
-        return identifier(value, field="project_id")
-
-    @field_validator("findings", mode="before")
-    @classmethod
-    def validate_findings(cls, value: object) -> object:
-        return tuple_only(value, field="findings")
-
-    @field_validator("fingerprint", mode="before")
-    @classmethod
-    def validate_fp(cls, value: object) -> str:
-        return fingerprint(value)
-
-    @model_validator(mode="after")
-    def verify(self) -> OptimizationAnalysis:
-        ids = tuple(item.finding_id for item in self.findings)
-        if len(ids) != len(set(ids)):
-            raise ValueError("finding ids must be unique")
-        if self.fingerprint != canonical_fingerprint(self, exclude={"fingerprint"}):
-            raise ValueError("optimization analysis fingerprint mismatch")
-        return self
-
-    @classmethod
-    def create(cls, **values: object) -> OptimizationAnalysis:
-        provisional = cls.model_construct(
-            **{**values, "fingerprint": "sha256:" + "0" * 64}
-        )
-        values["fingerprint"] = canonical_fingerprint(
-            provisional, exclude={"fingerprint"}
-        )
-        return cls.model_validate(values)
-
-
-class OptimizationApprovalRequest(OptimizationContract):
-    finding_id: str
-    finding_fingerprint: str
-    reviewer: str
-    decided_at: datetime
-
-    @field_validator("finding_id", "reviewer", mode="before")
-    @classmethod
-    def validate_ids(cls, value: object, info) -> str:
-        return identifier(value, field=info.field_name)
-
-    @field_validator("finding_fingerprint", mode="before")
-    @classmethod
-    def validate_fingerprint(cls, value: object) -> str:
-        return fingerprint(value, field="finding_fingerprint")
-
-    @field_validator("decided_at", mode="before")
-    @classmethod
-    def validate_decided_at(cls, value: object) -> datetime:
-        return utc_datetime(value)
-
-
-@runtime_checkable
-class OptimizationAnalysisPort(Protocol):
-    def get_snapshot(self, project_id: str) -> OptimizationAnalysis | None: ...
-
-
-@runtime_checkable
-class OptimizationApprovalPort(Protocol):
-    def approve(self, request: OptimizationApprovalRequest) -> OptimizationFinding: ...
-    def reject(self, request: OptimizationApprovalRequest) -> OptimizationFinding: ...
-
-
-def validate_finding(value: object) -> OptimizationFinding:
-    if type(value) is not OptimizationFinding:
-        raise TypeError("optimization finding is invalid")
-    return OptimizationFinding.model_validate(
-        copy.deepcopy(value.model_dump(mode="python"))
-    )
-
-
-def validate_analysis(value: object) -> OptimizationAnalysis:
-    if type(value) is not OptimizationAnalysis:
-        raise TypeError("optimization analysis is invalid")
-    return OptimizationAnalysis.model_validate(
-        copy.deepcopy(value.model_dump(mode="python"))
-    )
-
-
-__all__ = [
-    "OptimizationAnalysis",
-    "OptimizationAnalysisPort",
-    "OptimizationApprovalPort",
-    "OptimizationApprovalRequest",
-    "OptimizationCategory",
-    "OptimizationConfidence",
-    "OptimizationContract",
-    "OptimizationFinding",
-    "OptimizationStatus",
-    "OptimizationTarget",
-    "validate_analysis",
-    "validate_finding",
-]
+__all__ = tuple(name for name in globals() if not name.startswith("_"))

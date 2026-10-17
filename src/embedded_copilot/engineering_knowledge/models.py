@@ -194,6 +194,9 @@ class EngineeringRelation(EngineeringKnowledgeContract):
     relation_type: RelationType
     confidence: float
     source_memory_id: str
+    provenance: str = "memory"
+    evidence: tuple[str, ...] = ()
+    verification_status: Literal["APPROVED"] = "APPROVED"
     fingerprint: str
 
     @field_validator(
@@ -208,6 +211,24 @@ class EngineeringRelation(EngineeringKnowledgeContract):
     @classmethod
     def validate_confidence(cls, value: object) -> float:
         return _confidence(value)
+
+    @field_validator("provenance", mode="before")
+    @classmethod
+    def validate_provenance(cls, value: object) -> str:
+        return reference(value, field="provenance")
+
+    @field_validator("evidence", mode="before")
+    @classmethod
+    def validate_evidence(cls, value: object) -> object:
+        return tuple_only(value, field="evidence")
+
+    @field_validator("evidence")
+    @classmethod
+    def validate_evidence_values(cls, value: tuple[object, ...]) -> tuple[str, ...]:
+        checked = tuple(reference(item, field="evidence") for item in value)
+        if len(checked) != len(set(checked)):
+            raise ValueError("relation evidence must be unique")
+        return tuple(sorted(checked))
 
     @field_validator("fingerprint", mode="before")
     @classmethod
@@ -234,6 +255,18 @@ class EngineeringRelation(EngineeringKnowledgeContract):
             material[field] = identifier(material[field], field=field)
         material["relation_type"] = RelationType(material["relation_type"])
         material["confidence"] = _confidence(material["confidence"])
+        material["provenance"] = reference(
+            material.get("provenance", "memory"), field="provenance"
+        )
+        material["evidence"] = tuple(
+            sorted(
+                reference(item, field="evidence")
+                for item in tuple_only(
+                    material.get("evidence", ()), field="evidence"
+                )
+            )
+        )
+        material.setdefault("verification_status", "APPROVED")
         provisional = cls.model_construct(
             **{**material, "fingerprint": "sha256:" + "0" * 64}
         )

@@ -1,12 +1,3 @@
-from .adapters.fake import FakeOptimizationAnalysisPort, FakeOptimizationApprovalPort
+"""v4.6 production composition is intentionally explicit and external."""
 
-
-def create_optimization_ports() -> tuple[None, None]:
-    return None, None
-
-
-__all__ = [
-    "FakeOptimizationAnalysisPort",
-    "FakeOptimizationApprovalPort",
-    "create_optimization_ports",
-]
+__all__: tuple[str, ...] = ()

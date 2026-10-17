@@ -54,9 +54,7 @@ def test_retrieval_is_deterministic_and_project_bound() -> None:
     )
     service = EngineeringContextRetrievalService(projection)
     query = EngineeringContextQuery(project_id="project-1", query="camera")
-    first = service.get_context(query)
-    second = service.get_context(query)
-    assert first is not None
-    assert second is not None
-    assert first.fingerprint == second.fingerprint
-    assert first.related_nodes[0].summary == "camera interface decision"
+    snapshots = [service.get_context(query) for _ in range(100)]
+    assert all(snapshot is not None for snapshot in snapshots)
+    assert len({snapshot.fingerprint for snapshot in snapshots}) == 1
+    assert snapshots[0].related_nodes[0].summary == "camera interface decision"

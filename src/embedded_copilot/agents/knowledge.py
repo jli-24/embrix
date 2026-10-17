@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Any, Protocol
 
 from embedded_copilot.agents._common import (
     failure_update,
@@ -8,7 +8,7 @@ from embedded_copilot.agents._common import (
     tool_call_finished,
     tool_call_started,
 )
-from embedded_copilot.schemas.result import KnowledgeResult, ToolResult, ToolStatus
+from embedded_copilot.schemas.result import ErrorCode, ErrorDetail, KnowledgeResult, ToolResult, ToolStatus
 from embedded_copilot.schemas.state import AgentState
 from embedded_copilot.tools.document_tool import (
     DocumentSearchInput,
@@ -23,19 +23,76 @@ class DocumentTool(Protocol):
     ) -> ToolResult[DocumentSearchOutput]: ...
 
 
+class ProjectKnowledgeRetrievalPort(Protocol):
+    def search(
+        self,
+        *,
+        tenant_id: str,
+        project_id: str,
+        query: str,
+        sources: tuple[Any, ...],
+        top_k: int,
+    ) -> tuple[Any, ...]: ...
+
+
 class KnowledgeAgent:
     def __init__(
         self,
         *,
-        tool: DocumentTool,
+        tool: DocumentTool | None = None,
+        retrieval_port: ProjectKnowledgeRetrievalPort | None = None,
         top_k: int = 4,
         score_threshold: float = 0.15,
     ) -> None:
         self._tool = tool
+        self._retrieval_port = retrieval_port
         self._top_k = top_k
         self._score_threshold = score_threshold
 
+    def retrieve(
+        self,
+        *,
+        tenant_id: str,
+        project_id: str,
+        query: str,
+        top_k: int | None = None,
+    ) -> tuple[KnowledgeResult, ...]:
+        """Run the formal Knowledge Agent retrieval step without synthesis.
+
+        Final answer generation remains owned by ApplicationRuntime and its
+        ModelGateway. This method exists for the production Application path.
+        """
+        if self._retrieval_port is None:
+            raise RuntimeError("knowledge retrieval port is unavailable")
+        values = self._retrieval_port.search(
+            tenant_id=tenant_id,
+            project_id=project_id,
+            query=query,
+            sources=(),
+            top_k=top_k or self._top_k,
+        )
+        if not isinstance(values, tuple):
+            raise TypeError("knowledge retrieval result is invalid")
+        checked: list[KnowledgeResult] = []
+        for value in values:
+            item = KnowledgeResult.model_validate(value.model_dump(mode="python"))
+            if (
+                item.metadata.get("tenant_id") != tenant_id
+                or item.metadata.get("project_id") != project_id
+            ):
+                raise ValueError("knowledge retrieval identity mismatch")
+            checked.append(item)
+        return tuple(checked)
+
     async def run(self, state: AgentState) -> dict[str, object]:
+        if self._tool is None:
+            return failure_update(
+                state,
+                error=ErrorDetail(
+                    code=ErrorCode.RETRIEVAL_ERROR,
+                    message="Knowledge retrieval is unavailable.",
+                ),
+            )
         started_at = tool_call_started(state, tool_name="document_search_tool")
         tool_result = await self._tool.invoke(
             DocumentSearchInput(

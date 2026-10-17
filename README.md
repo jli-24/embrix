@@ -1,11 +1,11 @@
 # Embedded Copilot Agent
 
-Embedded Copilot Agent v0.39.0 是面向嵌入式工程师的可追踪工程分析系统。项目通过
+Embedded Copilot v7.0.0 是面向嵌入式工程师的可追踪工程分析系统。项目通过
 LangGraph Multi-Agent workflow、RAG、Tool Calling、结构化 evidence、FastAPI 与 Streamlit，
 把工程需求、领域分析、证据来源和最终 `EngineeringReport` 连接为离线可测、边界清晰、
 可审计的 Engineering Copilot 工作流。
 
-当前 package 与 runtime version literal 为 `v0.39.0`。VS Code MCP Integration Layer 提供
+当前 package 与 runtime version literal 为 `v7.0.0`。VS Code MCP Integration Layer 提供
 transport-neutral 工具适配契约；不安装 MCP SDK、不启动 MCP Server，也不修改 FastAPI contract、
 Agent API 或 `EngineeringReport` schema。
 
@@ -155,3 +155,6 @@ cases，覆盖 ESP32 Camera、Firmware/Debug 与 PCB review workflow。指标包
 - Coding Runtime 不写入工程、不执行构建或 Git、不控制 IDE 或硬件；候选结论需要工程师审核。
 - Workspace Runtime 不执行命令、构建、Git、IDE 或 Agent 编排；文件变更必须通过已验证 proposal 与人工审批。
 - VS Code MCP Integration Layer 不包含 MCP SDK、server transport 或真实 VS Code 连接；Workspace Runtime 保持唯一写入口。
+
+- 制造包闭环读取 `ManufacturingSpecification`、需求、工程决策、DesignTruth、PCB/BOM artifact 和既有 evidence。板厚、表面处理、铜厚、阻焊和丝印只有在需求、工程决策或用户批准的 `ManufacturingParameterDecision` 中明确给出时才会关闭；否则保留为 `UNSPECIFIED` 并返回 `BLOCKED_MANUFACTURING_PARAMETER_REQUIRED`。
+- `PCB_ONLY` 仅通过既有 `ExecutionWorker` 和 KiCad CLI 生成 Gerber、Drill 与制造包。成功包包含 `gerber/`、`drill/`、`pcb_source/`、`manifest.json` 和 `evidence.json`，并绑定项目、PCB、DesignTruth、制造规格 fingerprint 与 revision；CPL 和 Pick-and-Place 不在该模式生成。

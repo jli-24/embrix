@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+from embedded_copilot.correlation import CorrelationContext
 from embedded_copilot.execution_worker.contracts import (
     ApprovalPurpose,
     ApprovalStatus,
     ArtifactIdentity,
     BuildOperation,
+    ExecutionProposal,
     ExecutionTarget,
     FlashOperation,
     HilOperation,
@@ -35,6 +38,10 @@ from embedded_copilot.execution_worker.registry import ExecutionToolRegistry, To
 from embedded_copilot.execution_worker.service import ExecutionOperationService
 from embedded_copilot.execution_worker.store import SQLiteExecutionStore
 from embedded_copilot.execution_worker.worker import ExecutionWorker
+from embedded_copilot.firmware_engineering import (
+    FirmwareBuildConfiguration, FirmwareBuildRequest, FirmwareSourceArtifact,
+)
+from tests.execution_worker.test_service import _build_operation_for_proposal, _build_proposal
 
 
 FP = "sha256:" + "3" * 64
@@ -69,6 +76,12 @@ def _test_operation() -> ExecutionTestOperation:
         nonce="nonce-test-worker-1",
         test_suite_id="firmware-smoke",
         test_profile_id="default-validation",
+        correlation=CorrelationContext(
+            request_id="request-worker-1",
+            trace_id="trace-worker-1",
+            project_id="project-1",
+            operation_id="operation-test-worker-1",
+        ),
     )
 
 
@@ -242,6 +255,42 @@ class _Build:
         return AdapterResult("SUCCEEDED", "synthetic adapter result")
 
 
+def test_build_staging_excludes_old_output_and_preserves_original(tmp_path) -> None:
+    operation = _build_operation_for_proposal(_build_proposal())
+    request = operation.firmware_build_request
+    assert request is not None and request.configuration is not None
+    config_payload = request.configuration.model_dump(mode="python")
+    config_payload["build_directory"] = "build"
+    configuration = FirmwareBuildConfiguration.model_validate(config_payload)
+    request_payload = request.model_dump(mode="python")
+    request_payload.update(configuration=configuration)
+    request_payload.pop("fingerprint")
+    updated_request = FirmwareBuildRequest.create(**request_payload)
+    operation_payload = operation.model_dump(mode="python")
+    operation_payload.update(
+        firmware_build_request=updated_request,
+        firmware_build_request_fingerprint=updated_request.fingerprint,
+        build_directory="build",
+        fingerprint="sha256:" + "0" * 64,
+    )
+    operation = BuildOperation.model_validate(operation_payload)
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "main.c").write_text("source")
+    (project_root / "build").mkdir()
+    (project_root / "build" / "firmware.elf").write_bytes(b"old output")
+    store = SQLiteExecutionStore(tmp_path / "execution.sqlite3")
+    worker = ExecutionWorker(worker_id="worker-a", store=store, registry=None, workspace_resolver=None, targets=None)
+
+    source_root, state_root = worker._stage_build_workspace(operation, project_root)
+
+    assert (source_root / "main.c").read_text() == "source"
+    assert not (source_root / "build").exists()
+    assert (project_root / "build" / "firmware.elf").read_bytes() == b"old output"
+    assert state_root.is_relative_to(tmp_path / "build-sandboxes")
+    assert not state_root.is_relative_to(project_root)
+
+
 class _Test:
     def __init__(self, store: SQLiteExecutionStore) -> None:
         self._store = store
@@ -268,22 +317,105 @@ class _SuccessAdapter:
         return AdapterResult("SUCCEEDED", "synthetic adapter result")
 
 
-def test_worker_claims_once_consumes_approval_and_writes_receipt(tmp_path) -> None:
+class _InvalidAdapter:
+    def execute(self, operation, context):
+        return None
+
+
+@pytest.mark.parametrize("proposal_state", ["present", "missing", "unavailable", "stale", "missing_context"])
+def test_worker_rejects_build_success_without_typed_verification_evidence(tmp_path, monkeypatch, proposal_state: str) -> None:
     store = SQLiteExecutionStore(tmp_path / "execution.sqlite3")
     target = ExecutionTarget(target_id="target-1", tenant_id="tenant-1", project_id="project-1", target_kind="STM32F446RE", board_family="NUCLEO-F446RE", mcu_family="STM32F446RE", stable_identity_hash="probe-1", candidate_id="candidate-1", binding_status=TargetBindingStatus.BOUND, bound_by="operator-1", bound_at=datetime.now(UTC))
     operation = _operation().model_validate({**_operation().model_dump(mode="python"), "target_fingerprint": target.fingerprint, "fingerprint": "sha256:" + "0" * 64})
-    request = OperationRequest(operation=operation)
+    configuration = FirmwareBuildConfiguration(
+        target_kind="STM32F446RE", build_system="CMAKE",
+        toolchain_id="CMAKE_NINJA_BUILD", toolchain_version="3",
+        profile="DEBUG", build_directory=".", expected_artifact_types=("ELF",),
+    )
+    firmware = FirmwareBuildRequest.create(
+        project_id="project-1", firmware_reference="firmware-1",
+        build_profile="DEBUG", firmware_spec_id="spec-1",
+        firmware_spec_fingerprint=FP, implementation_id="implementation-1",
+        implementation_fingerprint=FP, target_kind="STM32F446RE",
+        build_system="CMAKE", toolchain_id="CMAKE_NINJA_BUILD",
+        toolchain_version="3", configuration=configuration,
+        source_artifacts=(FirmwareSourceArtifact(
+            relative_path="main.c", content_fingerprint=FP,
+            size_bytes=10, source_revision=FP,
+        ),), expected_source_revision=FP, actual_source_revision=FP,
+    )
     service = ExecutionOperationService(store=store)
+    proposal = service.create_proposal(ExecutionProposal(
+        proposal_id=operation.proposal_id,
+        tenant_id=operation.tenant_id,
+        project_id=operation.project_id,
+        requester_id=operation.requester_id,
+        target_id=operation.target_id,
+        target_fingerprint=operation.target_fingerprint,
+        workspace_snapshot_id=operation.workspace_snapshot_id,
+        workspace_fingerprint=operation.workspace_fingerprint,
+        approved_workspace_operation_id="workspace-operation-1",
+        approved_workspace_receipt_fingerprint=FP,
+        operation_type=OperationType.BUILD,
+        toolchain_id=operation.toolchain.toolchain_id,
+        toolchain_version=operation.toolchain.tool_version,
+        build_configuration=operation.configuration,
+        created_at=operation.created_at,
+        source_revision=FP,
+        firmware_build_request_fingerprint=firmware.fingerprint,
+    ))
+    operation = BuildOperation.model_validate({
+        **operation.model_dump(mode="python"),
+        "proposal_fingerprint": proposal.fingerprint,
+        "toolchain": ToolchainIdentity(
+            toolchain_id="CMAKE_NINJA_BUILD", tool_version="3",
+            tool_family="CMAKE", supported_operation=OperationType.BUILD,
+            supported_target="STM32F446RE",
+        ),
+        "firmware_build_request_id": firmware.firmware_reference,
+        "firmware_build_request_fingerprint": firmware.fingerprint,
+        "firmware_spec_id": firmware.firmware_spec_id,
+        "firmware_spec_fingerprint": firmware.firmware_spec_fingerprint,
+        "implementation_id": firmware.implementation_id,
+        "implementation_fingerprint": firmware.implementation_fingerprint,
+        "source_artifacts": firmware.source_artifacts,
+        "build_system": firmware.build_system,
+        "firmware_build_request": firmware,
+        "fingerprint": "sha256:" + "0" * 64,
+    })
+    request = OperationRequest(operation=operation)
     service.create_operation(request)
     approval = service.issue_approval(operation=request, reviewer_id="reviewer-1", nonce="approval-1", expires_at=datetime.now(UTC) + timedelta(minutes=5))
     service.enqueue(operation=request, approval_id=approval.grant_id)
+    if proposal_state == "missing":
+        monkeypatch.setattr(store, "get_proposal", lambda *_args: None)
+    elif proposal_state == "unavailable":
+        def unavailable(*_args):
+            raise RuntimeError("proposal store unavailable")
+        monkeypatch.setattr(store, "get_proposal", unavailable)
     registry = ExecutionToolRegistry(TrustedToolDiscovery())
-    worker = ExecutionWorker(worker_id="worker-a", store=store, registry=registry, workspace_resolver=_Workspace(), targets=_Targets(target), build=_Build())
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "main.c").write_text("int main(void) { return 0; }")
+    class _BuildWorkspace:
+        def resolve(self, **_kwargs):
+            return project_root
+    worker = ExecutionWorker(worker_id="worker-a", store=store, registry=registry, workspace_resolver=_BuildWorkspace(), targets=_Targets(target), build=_Build(), build_context_revalidator=None if proposal_state == "missing_context" else lambda _operation: proposal_state != "stale")
     result = worker.run_once()
     assert result is not None
-    assert result.status.value == "SUCCEEDED"
-    assert store.get_receipt("tenant-1", "project-1", operation.operation_id) is not None
-    assert store.consume_approval(tenant_id="tenant-1", project_id="project-1", grant_id=approval.grant_id, operation_fingerprint=operation.fingerprint, now=datetime.now(UTC)) is None
+    assert result.status is OperationStatus.FAILED
+    receipt = store.get_receipt("tenant-1", "project-1", operation.operation_id)
+    assert receipt is None
+    assert result.safe_detail == ("current build context unavailable" if proposal_state == "missing_context" else "build approval is stale" if proposal_state == "stale" else "proposal binding mismatch" if proposal_state != "present" else "build verification evidence unavailable")
+    assert (project_root / "main.c").read_text() == "int main(void) { return 0; }"
+    assert not (project_root / ".embedded-copilot-state").exists()
+    operation_directory = hashlib.sha256(f"{operation.tenant_id}|{operation.project_id}|{operation.operation_id}".encode()).hexdigest()
+    if proposal_state == "present":
+        assert (tmp_path / "build-sandboxes" / operation_directory / "source" / "main.c").is_file()
+    else:
+        assert not (tmp_path / "build-sandboxes" / operation_directory).exists()
+    if proposal_state == "present":
+        assert store.consume_approval(tenant_id="tenant-1", project_id="project-1", grant_id=approval.grant_id, operation_fingerprint=operation.fingerprint, now=datetime.now(UTC)) is None
 
 
 def test_flash_like_running_state_recovers_to_unknown_target_state(tmp_path) -> None:
@@ -324,6 +456,11 @@ def test_worker_dispatches_test_after_running_and_writes_success_receipt(tmp_pat
     assert receipt.tool_execution_status == "SUCCEEDED"
     assert receipt.target_runtime_verification_status == "NOT_VERIFIED"
     assert receipt.safe_diagnostics_summary == "synthetic test validation"
+    assert receipt.correlation is not None
+    assert receipt.correlation.request_id == "request-worker-1"
+    assert receipt.correlation.trace_id == "trace-worker-1"
+    assert receipt.correlation.approval_id == approval.grant_id
+    assert receipt.correlation.workflow_run_id is None
     with sqlite3.connect(database) as connection:
         events = tuple(
             OperationEvent.model_validate_json(row[0])
@@ -374,6 +511,30 @@ def test_worker_default_test_adapter_writes_unavailable_receipt_and_fails_closed
     assert receipt.artifact is None
     assert receipt.evidence_references == ()
     assert "pass" not in receipt.safe_diagnostics_summary.casefold()
+
+
+def test_worker_rejects_non_typed_adapter_result(tmp_path) -> None:
+    store = SQLiteExecutionStore(tmp_path / "execution.sqlite3")
+    target = _target()
+    operation = _bind_target(_test_operation(), target)
+    _enqueue(store, operation)
+    worker = ExecutionWorker(
+        worker_id="worker-invalid-adapter-result",
+        store=store,
+        registry=ExecutionToolRegistry(TrustedToolDiscovery()),
+        workspace_resolver=_Workspace(),
+        targets=_Targets(target),
+        test=_InvalidAdapter(),
+    )
+
+    result = worker.run_once()
+
+    assert result is not None
+    assert result.status is OperationStatus.FAILED
+    assert result.safe_detail == "adapter result invalid"
+    assert store.get_receipt(
+        operation.tenant_id, operation.project_id, operation.operation_id
+    ) is None
 
 
 def test_terminal_transition_rolls_back_receipt_and_status_when_event_fails(
@@ -444,9 +605,15 @@ def test_worker_rejects_cross_purpose_test_approval_before_running(tmp_path) -> 
     queued = waiting.model_validate(
         {
             **waiting.model_dump(mode="python"),
-            "status": OperationStatus.QUEUED,
-            "approval_id": forged.grant_id,
-            "fingerprint": "sha256:" + "0" * 64,
+                "status": OperationStatus.QUEUED,
+                "approval_id": forged.grant_id,
+                "correlation": CorrelationContext.model_validate(
+                    {
+                        **waiting.correlation.model_dump(mode="python"),
+                        "approval_id": forged.grant_id,
+                    }
+                ),
+                "fingerprint": "sha256:" + "0" * 64,
         }
     )
     store.save_status(queued)
@@ -510,6 +677,10 @@ def test_worker_restart_recovers_running_test_as_interrupted(tmp_path) -> None:
     assert len(recovered) == 1
     assert recovered[0].status is OperationStatus.RECOVERY_REQUIRED
     assert recovered[0].recovery_state is RecoveryState.INTERRUPTED
+    assert recovered[0].correlation is not None
+    assert recovered[0].correlation.request_id == "request-worker-1"
+    assert recovered[0].correlation.trace_id == "trace-worker-1"
+    assert recovered[0].correlation.approval_id == "approval-test-1"
 
 
 @pytest.mark.parametrize(

@@ -14,6 +14,7 @@ from embedded_copilot.services.canonical_runtime import (
     CANONICAL_RUNTIME_ROUTER,
     build_canonical_runtime,
 )
+import embedded_copilot.services.canonical_runtime as canonical_runtime
 from embedded_copilot.services.config import Settings
 from embedded_copilot.services.legacy_runtime import (
     LEGACY_RUNTIME_AGENT_TYPES,
@@ -104,3 +105,27 @@ def test_legacy_runtime_composes_existing_analysis_service() -> None:
     service = build_legacy_runtime(Settings(_env_file=None))
 
     assert isinstance(service, AnalysisService)
+
+
+def test_ollama_production_embedding_branch_does_not_use_hash_embedding(monkeypatch) -> None:
+    class StubOllamaEmbedding:
+        identity = "ollama|embeddinggemma|ollama-embed-v1|3"
+
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+        def probe(self):
+            return object()
+
+    monkeypatch.setattr(canonical_runtime, "OllamaEmbeddingAdapter", StubOllamaEmbedding)
+
+    embedding = canonical_runtime._build_embedding(
+        Settings(
+            _env_file=None,
+            embedding_provider="ollama",
+            embedding_model="embeddinggemma",
+        )
+    )
+
+    assert isinstance(embedding, StubOllamaEmbedding)
+    assert embedding.kwargs["model"] == "embeddinggemma"

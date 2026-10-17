@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeVar
@@ -15,6 +16,17 @@ from .contracts import (
     ExecutionProposal,
     ExecutionTarget,
     FlashOperation,
+    HardwareBringupOperation,
+    FirmwareSourceWriteOperation,
+    SchematicErcOperation,
+    SchematicParseOperation,
+    SchematicReadBackOperation,
+    SchematicWriteOperation,
+    PCBWriteOperation,
+    PcbDrcOperation,
+    PcbDrcBaselineOperation,
+    KiCadManufacturingOperation,
+    KiCadNativeFootprintMoveOperation,
     FingerprintedContract,
     HilOperation,
     HilStepKind,
@@ -27,6 +39,7 @@ from .contracts import (
     OperationType,
     RecoveryDecision,
     RecoveryState,
+    SimulationOperation,
     TestOperation,
     UartObservationOperation,
     TargetDiscoveryCandidate,
@@ -145,6 +158,7 @@ class SQLiteExecutionStore:
             receipt_fingerprint=receipt_fingerprint,
             reason_code=reason_code,
             occurred_at=occurred_at,
+            correlation=self._correlation_for(operation, approval_id),
         )
         connection.execute(
             "INSERT INTO v66_operation_events(tenant_id, project_id, sequence, event_id, operation_id, body) "
@@ -159,6 +173,31 @@ class SQLiteExecutionStore:
             ),
         )
         return event
+
+    @staticmethod
+    def _correlation_for(operation: Any, approval_id: str | None):
+        correlation = getattr(operation, "correlation", None)
+        if correlation is None:
+            return None
+        return correlation.__class__.model_validate(
+            {
+                **correlation.model_dump(mode="python"),
+                "approval_id": approval_id,
+            }
+        )
+
+    @classmethod
+    def _assert_correlation_binding(
+        cls,
+        operation: Any,
+        value: Any,
+        *,
+        approval_id: str | None,
+        field: str,
+    ) -> None:
+        expected = cls._correlation_for(operation, approval_id)
+        if value.correlation != expected:
+            raise ValueError(f"{field} correlation binding mismatch")
 
     def _append_event(
         self,
@@ -264,9 +303,24 @@ class SQLiteExecutionStore:
         model = {
             "BUILD": BuildOperation,
             "TEST": TestOperation,
+            "SIMULATION": SimulationOperation,
             "FLASH": FlashOperation,
+            "HARDWARE_BRINGUP": HardwareBringupOperation,
             "UART_OBSERVATION": UartObservationOperation,
             "HIL": HilOperation,
+            "FIRMWARE_SOURCE_WRITE": FirmwareSourceWriteOperation,
+            "KICAD_SCHEMATIC_WRITE": SchematicWriteOperation,
+            "KICAD_SCHEMATIC_ERC": SchematicErcOperation,
+            "KICAD_SCHEMATIC_PARSE": SchematicParseOperation,
+            "KICAD_SCHEMATIC_READ_BACK": SchematicReadBackOperation,
+            "KICAD_PCB_WRITE": PCBWriteOperation,
+            "KICAD_NATIVE_FOOTPRINT_MOVE": KiCadNativeFootprintMoveOperation,
+            "KICAD_PCB_DRC": PcbDrcOperation,
+            "KICAD_PCB_DRC_BASELINE": PcbDrcBaselineOperation,
+            "KICAD_GERBER_EXPORT": KiCadManufacturingOperation,
+            "KICAD_DRILL_EXPORT": KiCadManufacturingOperation,
+            "KICAD_POSITION_EXPORT": KiCadManufacturingOperation,
+            "MANUFACTURING_PACKAGE_BUILD": KiCadManufacturingOperation,
         }.get(payload.get("operation_type"))
         if model is None:
             return None
@@ -309,6 +363,12 @@ class SQLiteExecutionStore:
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                self._assert_correlation_binding(
+                    operation,
+                    status,
+                    approval_id=status.approval_id,
+                    field="operation status",
+                )
                 self._write_object(
                     connection,
                     kind="operation",
@@ -400,14 +460,29 @@ class SQLiteExecutionStore:
                     or approval.operation_id != operation.operation_id
                     or approval.operation_type is not operation.operation_type
                     or approval.operation_fingerprint != operation.fingerprint
+                    or approval.requester_id != operation.requester_id
+                    or approval.proposal_id != operation.proposal_id
+                    or approval.proposal_fingerprint != operation.proposal_fingerprint
+                    or approval.target_id != operation.target_id
+                    or approval.target_fingerprint != operation.target_fingerprint
+                    or approval.workspace_snapshot_id != operation.workspace_snapshot_id
+                    or approval.workspace_fingerprint != operation.workspace_fingerprint
                     or approval.status is not ApprovalStatus.ISSUED
+                    or occurred_at >= approval.expires_at
                 ):
                     raise ValueError("approval binding mismatch")
+                self._assert_correlation_binding(
+                    operation,
+                    current,
+                    approval_id=current.approval_id,
+                    field="operation status",
+                )
                 updated = OperationStatusView.model_validate(
                     {
                         **current.model_dump(mode="python"),
                         "status": OperationStatus.QUEUED,
                         "approval_id": approval.grant_id,
+                        "correlation": self._correlation_for(operation, approval.grant_id),
                         "updated_at": occurred_at,
                         "fingerprint": "sha256:" + "0" * 64,
                     }
@@ -449,6 +524,7 @@ class SQLiteExecutionStore:
         approval_id: str,
         worker_id: str,
         now: datetime,
+        baseline_revalidate: Callable[[], bool] | None = None,
     ) -> OperationStatusView | None:
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -479,6 +555,13 @@ class SQLiteExecutionStore:
                 or approval.operation_id != operation.operation_id
                 or approval.operation_type is not operation.operation_type
                 or approval.operation_fingerprint != operation.fingerprint
+                or approval.requester_id != operation.requester_id
+                or approval.proposal_id != operation.proposal_id
+                or approval.proposal_fingerprint != operation.proposal_fingerprint
+                or approval.target_id != operation.target_id
+                or approval.target_fingerprint != operation.target_fingerprint
+                or approval.workspace_snapshot_id != operation.workspace_snapshot_id
+                or approval.workspace_fingerprint != operation.workspace_fingerprint
                 or approval.status is not ApprovalStatus.ISSUED
                 or now >= approval.expires_at
                 or queue_row is None
@@ -487,7 +570,16 @@ class SQLiteExecutionStore:
             ):
                 connection.execute("ROLLBACK")
                 return None
+            self._assert_correlation_binding(
+                operation,
+                status,
+                approval_id=status.approval_id,
+                field="operation status",
+            )
             try:
+                if isinstance(operation, PcbDrcBaselineOperation) and (baseline_revalidate is None or baseline_revalidate() is not True):
+                    connection.execute("ROLLBACK")
+                    return None
                 consumed = OperationApprovalGrant.model_validate(
                     {
                         **approval.model_dump(mode="python"),
@@ -551,6 +643,18 @@ class SQLiteExecutionStore:
                 persisted = self._load(row, OperationStatusView)
                 if persisted != current:
                     raise ValueError("operation state changed")
+                self._assert_correlation_binding(
+                    operation,
+                    current,
+                    approval_id=current.approval_id,
+                    field="operation status",
+                )
+                self._assert_correlation_binding(
+                    operation,
+                    updated,
+                    approval_id=updated.approval_id,
+                    field="operation status",
+                )
                 self._write_object(connection, kind="cancellation", value=request, object_id=request.request_id)
                 connection.execute(
                     "UPDATE v66_objects SET body=? WHERE kind='status' AND tenant_id=? AND project_id=? AND object_id=? AND body=?",
@@ -580,12 +684,14 @@ class SQLiteExecutionStore:
         *,
         reason_code: str,
         receipt: OperationReceipt | None = None,
+        baseline_revalidate: Callable[[], bool] | None = None,
     ) -> OperationStatusView:
         event_type = {
             OperationStatus.SUCCEEDED: OperationEventType.OPERATION_SUCCEEDED,
             OperationStatus.FAILED: OperationEventType.OPERATION_FAILED,
             OperationStatus.CANCELLED: OperationEventType.OPERATION_CANCELLED,
             OperationStatus.TIMED_OUT: OperationEventType.OPERATION_TIMED_OUT,
+            OperationStatus.RECOVERY_REQUIRED: OperationEventType.RECOVERY_REQUIRED,
         }.get(updated.status)
         if event_type is None:
             raise ValueError("terminal operation status is invalid")
@@ -605,6 +711,33 @@ class SQLiteExecutionStore:
                     OperationStatus.CANCEL_PENDING,
                 }:
                     raise ValueError("operation state changed")
+                independent_schematic = isinstance(operation, SchematicParseOperation) or (
+                    isinstance(operation, SchematicErcOperation) and operation.source_parse_operation_id is not None
+                )
+                if independent_schematic and updated.status is OperationStatus.SUCCEEDED:
+                    approval_row = connection.execute(
+                        "SELECT body FROM v66_objects WHERE kind='approval' AND tenant_id=? AND project_id=? AND object_id=?",
+                        (operation.tenant_id, operation.project_id, current.approval_id),
+                    ).fetchone()
+                    approval = self._load(approval_row, OperationApprovalGrant)
+                    if (current.cancellation_requested or approval is None
+                        or updated.updated_at >= min(operation.expires_at, approval.expires_at)):
+                        raise ValueError("schematic evidence success cancelled or expired")
+                if isinstance(operation, PcbDrcBaselineOperation) and updated.status is OperationStatus.SUCCEEDED:
+                    if baseline_revalidate is None or baseline_revalidate() is not True:
+                        raise ValueError("baseline canonical input changed before final transaction")
+                self._assert_correlation_binding(
+                    operation,
+                    current,
+                    approval_id=current.approval_id,
+                    field="operation status",
+                )
+                self._assert_correlation_binding(
+                    operation,
+                    updated,
+                    approval_id=updated.approval_id,
+                    field="operation status",
+                )
                 if receipt is not None:
                     if (
                         receipt.operation_id != operation.operation_id
@@ -613,6 +746,12 @@ class SQLiteExecutionStore:
                         or updated.receipt_fingerprint != receipt.fingerprint
                     ):
                         raise ValueError("receipt binding mismatch")
+                    self._assert_correlation_binding(
+                        operation,
+                        receipt,
+                        approval_id=updated.approval_id,
+                        field="operation receipt",
+                    )
                     self._write_object(
                         connection,
                         kind="receipt",
@@ -663,6 +802,18 @@ class SQLiteExecutionStore:
                 persisted = self._load(row, OperationStatusView)
                 if persisted != current or current.status is not OperationStatus.RECOVERY_REQUIRED:
                     raise ValueError("operation state changed")
+                self._assert_correlation_binding(
+                    operation,
+                    current,
+                    approval_id=current.approval_id,
+                    field="operation status",
+                )
+                self._assert_correlation_binding(
+                    operation,
+                    updated,
+                    approval_id=updated.approval_id,
+                    field="operation status",
+                )
                 self._write_object(connection, kind="recovery", value=decision, object_id=decision.decision_id)
                 connection.execute(
                     "UPDATE v66_objects SET body=? WHERE kind='status' AND tenant_id=? AND project_id=? AND object_id=? AND body=?",
@@ -700,6 +851,20 @@ class SQLiteExecutionStore:
         if row is None:
             return None
         return self._operation_from_body(row["body"])
+
+    def terminal_schematic_receipts(self) -> tuple[tuple[object, OperationReceipt], ...]:
+        """Reconcile only committed receipts; never infer a result from RUNNING."""
+        with self._lock, self._connect() as connection:
+            rows = connection.execute("SELECT body FROM v66_objects WHERE kind='receipt' ORDER BY object_id").fetchall()
+        result = []
+        for row in rows:
+            receipt = OperationReceipt.model_validate_json(row["body"], strict=False)
+            if receipt.operation_type.value not in {"KICAD_SCHEMATIC_WRITE", "KICAD_SCHEMATIC_PARSE", "KICAD_SCHEMATIC_READ_BACK", "KICAD_SCHEMATIC_ERC"}:
+                continue
+            operation = self.get_operation(receipt.tenant_id, receipt.project_id, receipt.operation_id)
+            if operation is not None:
+                result.append((operation, receipt))
+        return tuple(result)
 
     def list_operations(self, tenant_id: str, project_id: str, *, limit: int = 20) -> tuple[object, ...]:
         if type(limit) is not int or not 1 <= limit <= 100:
@@ -792,12 +957,38 @@ class SQLiteExecutionStore:
                 (tenant_id, project_id, operation_id, "QUEUED"),
             )
 
-    def claim_next(self, *, worker_id: str, lease_seconds: int, now: datetime) -> tuple[str, str, str] | None:
+    def claim_next(
+        self,
+        *,
+        worker_id: str,
+        lease_seconds: int,
+        now: datetime,
+        operation_types: tuple[OperationType, ...] | None = None,
+    ) -> tuple[str, str, str] | None:
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT tenant_id, project_id, operation_id FROM v66_queue WHERE state='QUEUED' ORDER BY operation_id LIMIT 1"
-            ).fetchone()
+            rows = connection.execute(
+                "SELECT q.tenant_id, q.project_id, q.operation_id, o.body "
+                "FROM v66_queue AS q JOIN v66_objects AS o "
+                "ON o.kind='operation' AND o.tenant_id=q.tenant_id "
+                "AND o.project_id=q.project_id AND o.object_id=q.operation_id "
+                "WHERE q.state='QUEUED' ORDER BY q.operation_id"
+            ).fetchall()
+            allowed = None if operation_types is None else set(operation_types)
+            row = next(
+                (
+                    item
+                    for item in rows
+                    if allowed is None
+                    or getattr(
+                        self._operation_from_body(item["body"]),
+                        "operation_type",
+                        None,
+                    )
+                    in allowed
+                ),
+                None,
+            )
             if row is None:
                 connection.execute("COMMIT")
                 return None
@@ -853,24 +1044,42 @@ class SQLiteExecutionStore:
                 (tenant_id, project_id),
             ).fetchone() is not None
 
-    def recover_running(self, *, now: datetime) -> tuple[OperationStatusView, ...]:
+    def recover_running(
+        self,
+        *,
+        now: datetime,
+        operation_types: tuple[OperationType, ...] | None = None,
+        recovery_classify: Callable[[object], RecoveryState] | None = None,
+    ) -> tuple[OperationStatusView, ...]:
         recovered: list[OperationStatusView] = []
         with self._lock, self._connect() as connection:
             rows = connection.execute("SELECT body FROM v66_objects WHERE kind='status'").fetchall()
         for row in rows:
             value = OperationStatusView.model_validate_json(row["body"])
+            if operation_types is not None and value.operation_type not in operation_types:
+                continue
             if value.status is not OperationStatus.RUNNING:
                 continue
+            operation = self.get_operation(value.tenant_id, value.project_id, value.operation_id)
             recovery = RecoveryState.TARGET_STATE_UNKNOWN if value.operation_type.value == "FLASH" else RecoveryState.INTERRUPTED
+            if isinstance(operation, PcbDrcBaselineOperation) or (isinstance(operation, KiCadNativeFootprintMoveOperation) and operation.production_context is not None):
+                try:
+                    recovery = recovery_classify(operation) if recovery_classify is not None else RecoveryState.TARGET_STATE_UNKNOWN
+                except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+                    recovery = RecoveryState.TARGET_STATE_UNKNOWN
             updated = OperationStatusView.model_validate({
                 **value.model_dump(mode="python"),
                 "status": OperationStatus.RECOVERY_REQUIRED,
                 "recovery_state": recovery,
                 "safe_detail": "worker interruption requires recovery decision",
                 "updated_at": now,
+                "correlation": (
+                    self._correlation_for(operation, value.approval_id)
+                    if operation is not None
+                    else value.correlation
+                ),
                 "fingerprint": "sha256:" + "0" * 64,
             })
-            operation = self.get_operation(value.tenant_id, value.project_id, value.operation_id)
             if operation is None:
                 self.save_status(updated)
                 recovered.append(updated)

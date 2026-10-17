@@ -114,7 +114,7 @@ def test_health_schema_preserves_fields_and_required_state() -> None:
     assert schema["additionalProperties"] is False
     assert schema["required"] == ["status", "mode"]
     assert set(schema["properties"]) == {"status", "version", "mode"}
-    assert schema["properties"]["status"]["enum"] == ["ok", "degraded"]
+    assert schema["properties"]["status"]["enum"] == ["ok", "degraded", "unavailable"]
     assert schema["properties"]["mode"]["enum"] == ["offline", "llm"]
-    assert schema["properties"]["version"]["const"] == "0.39.0"
-    assert schema["properties"]["version"]["default"] == "0.39.0"
+    assert schema["properties"]["version"]["const"] == "7.1.0"
+    assert schema["properties"]["version"]["default"] == "7.1.0"

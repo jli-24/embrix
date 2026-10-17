@@ -13,6 +13,7 @@ from .contracts import (
     ValidationStatus,
     validate_completion_snapshot,
 )
+from .adapters.canonical import architecture_snapshot_from_canonical
 
 __all__ = [
     "EngineeringArchitectureSnapshot",
@@ -28,4 +29,5 @@ __all__ = [
     "ValidationResult",
     "ValidationStatus",
     "validate_completion_snapshot",
+    "architecture_snapshot_from_canonical",
 ]

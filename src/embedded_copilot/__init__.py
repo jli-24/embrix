@@ -1,3 +1,5 @@
 """Embedded Copilot Agent foundation package."""
 
-__version__ = "0.39.0"
+from embedded_copilot._version import PRODUCT_VERSION
+
+__version__ = PRODUCT_VERSION

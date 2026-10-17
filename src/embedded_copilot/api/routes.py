@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from embedded_copilot.api.models import AnalyzeRequest, AnalyzeResponse
 from embedded_copilot.integration.report import EngineeringReport
 from embedded_copilot.schemas.api import ChatRequest, ChatResponse, HealthResponse
-from embedded_copilot.schemas.result import ErrorCode
+from embedded_copilot.schemas.result import ErrorCode, ErrorDetail
 from embedded_copilot.services.analysis import AnalysisCommand
 from embedded_copilot.services.execution import (
     ExecutionCapacityError,
@@ -30,7 +30,7 @@ class ProductAnalysisService(Protocol):
     def get_report(self, execution_id: str) -> EngineeringReport: ...
 
 
-def get_chat_service(request: Request) -> ChatService:
+def get_chat_service(request: Request) -> ChatService | None:
     return request.app.state.copilot_service
 
 
@@ -118,8 +118,19 @@ async def analysis_report(
 async def chat(
     payload: ChatRequest,
     request: Request,
-    service: ChatService = Depends(get_chat_service),
+    service: ChatService | None = Depends(get_chat_service),
 ) -> ChatResponse | JSONResponse:
+    if service is None:
+        response = ChatResponse(
+            answer="",
+            trace_id=request.state.trace_id,
+            error=ErrorDetail(
+                code=ErrorCode.MODEL_ERROR,
+                message="Chat runtime is unavailable.",
+                retryable=False,
+            ),
+        )
+        return JSONResponse(status_code=503, content=response.model_dump(mode="json"))
     response = await service.chat(payload.message, trace_id=request.state.trace_id)
     if response.error is not None:
         return JSONResponse(

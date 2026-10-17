@@ -48,3 +48,19 @@ EMPTY_KICAD_BOARD = """(kicad_pcb
   (generator pcbnew)
   (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
 )"""
+
+
+STACKED_PAD_BOARD = """(kicad_pcb
+  (version 20240108)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+  (net 1 "BUTTON")
+  (footprint "Switch:Stacked"
+    (layer "F.Cu")
+    (at 1 2)
+    (property "Reference" "SW1")
+    (property "Value" "BUTTON")
+    (pad "1" smd rect (net 1 "BUTTON"))
+    (pad "1" smd rect (net 1 "BUTTON"))
+  )
+)"""

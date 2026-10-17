@@ -61,11 +61,10 @@ Requirement Understanding
 
 当前项目状态以用户批准的版本范围和仓库中的完成证据为准：
 
-- 已完成：v2.6 Engineering Optimization & Digital Twin Layer
-- 已完成：v2.7 Knowledge Evolution Layer
-- 已完成：v2.8 Engineering Completion Layer
-- 下一阶段：v2.9 Multimodal Engineering Input Layer
-- 未来阶段：v3.0 Engineering Memory Platform
+- 已完成：v3.4 Knowledge Governance Enhancement
+- 当前阶段：v3.5 Engineering Knowledge Evolution
+- 下一阶段：v3.6 Validation Intelligence
+- 未来阶段：v3.7 Optimization Loop
 
 “代码文件存在”不单独构成完成证据。处于 dirty worktree、设计阶段、测试未完成或安全边界未验证的能力，不得因为目录、类名、API 或 Roadmap 条目存在而被描述为已发布或已完成。
 
@@ -579,6 +578,61 @@ Approval 必须绑定目标、操作、proposal/action fingerprint、reviewer �
 
 Provider、model、embedding、设备和环境配置必须放在配置层或窄接口 adapter 后，不得硬编码凭据、模型名、机器路径或硬件设置。
 
+### 11.1.1 Windows Python Discovery Policy
+
+在 Windows 上发现 Python 版本时，必须优先使用 Windows Python Launcher，不得仅依据
+`python3.11`、`where python3.11` 或 `Get-Command python3.11` 的结果判断 Python 3.11
+是否可用。发现顺序固定为：
+
+1. 若仓库虚拟环境存在，先检查 `.venv\\Scripts\\python.exe`：
+
+   ```powershell
+   .venv\\Scripts\\python.exe --version
+   .venv\\Scripts\\python.exe -c "import sys; print(sys.executable); print(sys.version)"
+   ```
+
+2. 对明确要求的 Python 版本，使用对应的 Windows Python Launcher selector，例如：
+
+   ```powershell
+   py -3.11 --version
+   py -3.11 -c "import sys; print(sys.executable); print(sys.version)"
+   ```
+
+3. 如仍需确认已安装版本，再使用 `py -0p` 查看 inventory。其他明确版本依次使用
+   `py -3.12`、`py -3.13` 等对应 selector。
+
+如果 `py -3.11 --version` 成功，必须报告：
+
+```text
+PYTHON_3_11_DISCOVERABLE=true
+PYTHON_3_11_DISCOVERY_METHOD=PY_LAUNCHER
+```
+
+不得在 Windows Python Launcher 已证明版本可用后再次询问用户是否安装该版本。类似
+`WindowsApps\\python.exe` 的 Windows App Execution Alias 既不是仓库 canonical Python
+runtime 的充分证据，也不是目标 Python 版本已安装或不可用的充分证据；应优先使用
+`.venv\\Scripts\\python.exe` 或 `py -<version> -c "import sys; print(sys.executable)"`
+得到的 executable identity。
+
+正常仓库测试、lint、typecheck、build script 和其他项目命令，仓库虚拟环境存在且是项目
+预期环境时，必须优先使用 `.venv\\Scripts\\python.exe`。只有任务明确要求某个精确版本的
+兼容性、打包、迁移或 interpreter-specific regression verification，或需要为该版本创建
+或修复虚拟环境时，才使用 `py -<exact-version>` 执行；不得仅因发现了另一个 Python
+版本就静默替换项目虚拟环境。
+
+在报告 `PYTHON_<VERSION>_UNAVAILABLE=true` 之前，必须记录适用的
+`.venv\\Scripts\\python.exe`、`py -<version> --version` 和 `py -0p` 检查结果，并区分：
+
+```text
+PYTHON_<VERSION>_DISCOVERABLE=
+PROJECT_VENV_PRESENT=
+PROJECT_VENV_PYTHON_VERSION=
+EXACT_VERSION_EXECUTABLE=
+DISCOVERY_METHOD=
+```
+
+Python discovery failure 属于 environment/preflight 结果，不得误报为 product code defect。
+
 ### 11.2 Project Skill Routing
 
 Codex 中存在对应 Project Skill 时，按修改范围使用：
@@ -654,6 +708,55 @@ Roadmap、设计文档、目录、类名、DTO、Fake Adapter 或未接入的 AP
 版本使用 Semantic Versioning。提交应保持聚焦，不得提交凭据、生成的 vector store、设备 dump、机器相关文件或未经批准的工程资产。
 
 未经用户明确要求，不得执行 `git add`、`commit`、`tag`、`push`、`reset`、`checkout` 或 `stash`。
+
+### 11.8 Pasted Task Execution Policy
+
+Large pasted prompts may be represented by the client as generated pasted-text attachments instead of ordinary inline user-message text.
+
+When the current user turn contains a generated pasted-text attachment and there is no separate typed request outside that attachment:
+
+- Treat the pasted attachment itself as the user's current request.
+- Read the full pasted content before deciding whether the user supplied an actionable instruction.
+- If the pasted content defines a task and includes execution language such as:
+  - "现在开始执行"
+  - "开始执行"
+  - "请执行"
+  - "执行以下任务"
+  - "你现在执行"
+  - "Now execute"
+  - "Start executing"
+    then execute that task directly.
+
+Do NOT respond with statements such as:
+
+```text
+"The attachment defines a task, but your request is empty."
+"Please explicitly ask me to execute it."
+"I will not execute the attachment automatically."
+```
+
+when the generated pasted-text attachment itself clearly contains the execution request.
+
+A generated pasted-text attachment is part of the current user instruction, not merely reference material.
+
+Only treat an attachment as reference-only when:
+
+- the user explicitly says it is reference material only; or
+- it is an ordinary attached document/file rather than generated pasted prompt text; or
+- the pasted text contains no actionable request.
+
+If both a separately typed user request and a pasted attachment are present:
+
+- follow the separately typed request;
+- use the pasted attachment as supporting task context.
+
+If the pasted task ends with an explicit STOP condition, follow that STOP condition without asking for redundant confirmation.
+
+Do not ask the user to repeat:
+
+"请执行该任务"
+
+when the pasted task already explicitly authorizes execution.
 
 ## 12. Testing Rules
 
@@ -751,11 +854,38 @@ Safe Input Reference
 
 该名称仅定义计划阶段。任何执行能力必须继续遵守 Tool Layer、Approval、audit、timeout、cancellation 和 recovery 边界。
 
-### v3.4 Validation Intelligence
+### v3.4 Knowledge Governance Enhancement
+
+目标：把显式 Engineering Context evidence 投影为 Knowledge Candidate，经人工审核后生成
+`ApprovedKnowledge`。Governance 只通过受控 Sink 发布批准结果，不写入 Memory、Graph 或
+Retrieval，不调用 Agent、模型或工程执行能力。
+
+### v3.5 Engineering Knowledge Evolution
+
+目标：把只读 `ApprovedKnowledge` 转换为可审计的 `KnowledgeEvolutionProposal`，支持
+`MEMORY`、`GRAPH` 和 `RETRIEVAL` 三类目标，并通过人工 Review 与独立 ApplyRequest 控制
+`CREATED -> APPROVED/REJECTED -> APPLIED` 生命周期。
+
+固定边界：
+
+```text
+ApprovedKnowledgeSourcePort
+  -> KnowledgeEvolutionProposal
+  -> Human Review
+  -> EvolutionApplyRequest
+  -> ControlledEvolutionSinkPort
+```
+
+v3.5 只提供 Fake Source、Store 和 Controlled Sink，不连接或修改真实 Memory、Knowledge
+Graph 或 Retrieval 系统。`APPLIED` 只表示受控 Sink receipt 已被记录，不表示目标系统已更新。
+
+禁止自动写入知识系统、调用 Agent、调用外部模型或执行任何工程操作。
+
+### v3.6 Validation Intelligence
 
 该名称仅定义计划阶段。验证结果不得在缺少真实证据时宣称硬件已通过。
 
-### v3.5 Optimization Loop
+### v3.7 Optimization Loop
 
 该名称仅定义计划阶段。Optimization Proposal 不得自动修改或执行工程资产。
 

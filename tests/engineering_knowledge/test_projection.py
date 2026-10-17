@@ -32,7 +32,7 @@ def _memory(
         decision="selected",
         reason="evidence",
         confidence=0.9,
-        evidence=(),
+        evidence=(f"conversation:{memory_id}",),
         approval_audit=ApprovalAudit(
             approval_id=f"approval-{memory_id}",
             candidate_fingerprint=FP,
@@ -77,6 +77,15 @@ def test_explicit_relation_is_projected_without_semantic_inference() -> None:
     assert len(snapshot.relations) == 1
     assert snapshot.relations[0].source_node_id == "memory-1"
     assert snapshot.relations[0].target_node_id == "memory-2"
+    assert snapshot.relations[0].provenance == "decision:1"
+    assert snapshot.relations[0].evidence == ("conversation:1",)
+    assert snapshot.relations[0].verification_status == "APPROVED"
+
+
+def test_projection_rejects_project_mismatch() -> None:
+    source = _MemoryProjection((_memory("1"),))
+    with pytest.raises(EngineeringKnowledgeProjectionRejected):
+        EngineeringKnowledgeGraphProjectionService(source).project("project-2")
 
 
 def test_pending_projection_fails_closed() -> None:

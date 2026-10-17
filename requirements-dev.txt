@@ -4,3 +4,6 @@ pytest>=8.0,<9.0
 pytest-cov
 ruff
 black
+pywebview>=5.4,<7.0; sys_platform == "win32"
+pythonnet>=3.0,<4.0; sys_platform == "win32"
+pyinstaller>=6.0,<7.0

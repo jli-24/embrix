@@ -92,6 +92,23 @@ def test_filesystem_mode_excludes_sidecars_and_noncanonical_content(
     assert [result.id for result in results] == ["debug-fault"]
 
 
+def test_filesystem_mode_ignores_compile_commands_build_manifest(
+    tmp_path: Path,
+) -> None:
+    firmware = tmp_path / "firmware"
+    firmware.mkdir()
+    (firmware / "compile_commands.json").write_text("[]", encoding="utf-8")
+    (firmware / "i2c.md").write_text(
+        "# I2C\n\nI2C initialization evidence.", encoding="utf-8"
+    )
+
+    results = LocalKnowledgeProvider(knowledge_root=tmp_path).search(
+        KnowledgeQuery(query="I2C")
+    )
+
+    assert [result.id for result in results] == ["firmware:i2c"]
+
+
 def test_filesystem_mode_is_a_construction_time_snapshot(tmp_path: Path) -> None:
     _write_json(tmp_path, "firmware", "first")
     provider = LocalKnowledgeProvider(knowledge_root=tmp_path)

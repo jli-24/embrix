@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import ast
 from pathlib import Path
-
 
 ROOT = Path(__file__).parents[2] / "src" / "embedded_copilot"
 TARGETS = (
@@ -36,16 +34,11 @@ def _files() -> tuple[Path, ...]:
 
 
 def test_v18_core_does_not_import_external_mutation_or_provider_runtime() -> None:
+    from tests.security.boundary_audit import Sources, v18_violations
+
+    index = Sources(ROOT.parent)
+    modules = []
     for path in _files():
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                names = {alias.name.split(".")[0] for alias in node.names}
-                assert not names & FORBIDDEN_MODULES, path
-            elif isinstance(node, ast.ImportFrom):
-                assert (node.module or "").split(".")[0] not in FORBIDDEN_MODULES, path
-                imported = node.module or ""
-                assert "supervisor" not in imported
-                assert "knowledge_writer" not in imported
-                assert "memory_automation" not in imported
-                assert "reasoning_runtime" not in imported
+        parts = path.relative_to(ROOT.parent).with_suffix("").parts
+        modules.append(".".join(parts[:-1] if parts[-1] == "__init__" else parts))
+    assert v18_violations(index, modules) == []

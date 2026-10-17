@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections.abc import Mapping
 
 from chromadb.api.models.Collection import Collection
 
@@ -16,6 +17,7 @@ class RetrievedChunk:
     text: str
     citation: SourceCitation
     metadata: DocumentMetadata = field(default_factory=DocumentMetadata)
+    raw_metadata: Mapping[str, object] = field(default_factory=dict)
 
 
 class ChromaRetriever:
@@ -75,6 +77,8 @@ class ChromaRetriever:
             if score < score_threshold:
                 continue
             source_metadata = metadata or {}
+            if not isinstance(source_metadata, dict):
+                continue
             chip = source_metadata.get("chip")
             document_metadata = DocumentMetadata(
                 chip=None if chip == GENERIC_CHIP else chip,
@@ -98,6 +102,7 @@ class ChromaRetriever:
                     text=text or "",
                     citation=citation,
                     metadata=document_metadata,
+                    raw_metadata=dict(source_metadata),
                 )
             )
         return retrieved

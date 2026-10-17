@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -62,6 +63,33 @@ def _load_markdown(
     ]
 
 
+def _load_text(
+    path: Path,
+    source: str,
+    checksum: str,
+    metadata: DocumentMetadata,
+) -> list[LoadedDocument]:
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+        if path.suffix.lower() == ".json":
+            value = json.loads(raw)
+            raw = json.dumps(value, ensure_ascii=False, indent=2)
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise DocumentLoadError(f"Failed to read text document: {path.name}") from exc
+    if not raw:
+        raise DocumentLoadError(f"Document contains no readable text: {path.name}")
+    return [
+        LoadedDocument(
+            text=raw,
+            source=source,
+            filename=path.name,
+            page=None,
+            checksum=checksum,
+            metadata=metadata,
+        )
+    ]
+
+
 def _load_pdf(
     path: Path,
     source: str,
@@ -111,4 +139,6 @@ def load_document(
         return _load_pdf(document_path, source, checksum, metadata)
     if suffix in {".md", ".markdown"}:
         return _load_markdown(document_path, source, checksum, metadata)
+    if suffix in {".json", ".txt"}:
+        return _load_text(document_path, source, checksum, metadata)
     raise DocumentLoadError(f"Unsupported document type: {suffix or '<none>'}")

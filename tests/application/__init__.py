@@ -1,0 +1,1 @@
+"""Application Composition Root tests."""

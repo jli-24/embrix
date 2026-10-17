@@ -1,27 +1,22 @@
-class OptimizationAnalysisError(RuntimeError):
-    code = "OPTIMIZATION_UNAVAILABLE"
+class EngineeringOptimizationError(Exception):
+    pass
 
 
-class OptimizationUnavailable(OptimizationAnalysisError):
-    code = "OPTIMIZATION_UNAVAILABLE"
+class OptimizationRejected(EngineeringOptimizationError):
+    pass
 
 
-class OptimizationRejected(OptimizationAnalysisError):
-    code = "OPTIMIZATION_REJECTED"
+class OptimizationApprovalRequired(EngineeringOptimizationError):
+    pass
 
 
-class FindingNotFound(OptimizationAnalysisError):
-    code = "FINDING_NOT_FOUND"
+class OptimizationUnavailable(EngineeringOptimizationError):
+    pass
 
 
-class ApprovalRequired(OptimizationAnalysisError):
-    code = "APPROVAL_REQUIRED"
+class OptimizationAuditUnavailable(EngineeringOptimizationError):
+    pass
 
 
-__all__ = [
-    "ApprovalRequired",
-    "FindingNotFound",
-    "OptimizationAnalysisError",
-    "OptimizationRejected",
-    "OptimizationUnavailable",
-]
+class OptimizationConflict(EngineeringOptimizationError):
+    pass

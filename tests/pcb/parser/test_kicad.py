@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -8,10 +9,12 @@ from embedded_copilot.input import InputLoader
 from embedded_copilot.pcb.exceptions import PCBParseError
 from embedded_copilot.pcb.models import PCBNetType
 from embedded_copilot.pcb.parser import KiCadPCBParser, RootedPCBSourceResolver
+from embedded_copilot.pcb.parser import kicad as kicad_parser_module
 from tests.pcb.parser.fixtures import (
     COMPLETE_KICAD_BOARD,
     EMPTY_KICAD_BOARD,
     LEGACY_MODULE_BOARD,
+    STACKED_PAD_BOARD,
 )
 
 
@@ -27,6 +30,96 @@ def _parse(tmp_path: Path, content: str, *, filename: str = "demo.kicad_pcb"):
         RootedPCBSourceResolver(tmp_path, {attachment.id: filename})
     )
     return parser.parse(attachment)
+
+
+def _native_board(
+    *, version: str = "20240108", uuid: str | None = "01234567-89ab-4cde-8f01-23456789abcd"
+) -> bytes:
+    native_id = f"(uuid {uuid})" if uuid is not None else ""
+    return (
+        f'(kicad_pcb (version {version}) (generator pcbnew) '
+        '(layers (0 "F.Cu" signal)) '
+        f'(footprint "Library:Part" (layer "F.Cu") {native_id} '
+        '(at 10 20 90) (property "Reference" "U1") '
+        '(pad "1" smd rect (at 0 0) (net 1 "GND"))))'
+    ).encode()
+
+
+def test_native_observation_keeps_uuid_locator_and_omits_pad_net_claims() -> None:
+    result = kicad_parser_module.observe_kicad_pcb_bytes(
+        "hardware/demo.kicad_pcb", _native_board()
+    )
+
+    assert result.native_format_version == "20240108"
+    assert len(result.footprints) == 1
+    footprint = result.footprints[0]
+    assert footprint.native_id == "01234567-89ab-4cde-8f01-23456789abcd"
+    assert footprint.locator == "/kicad_pcb/footprint[0]"
+    assert footprint.library_id == "Library:Part"
+    assert footprint.reference == "U1"
+    assert (footprint.position_x_mm, footprint.position_y_mm, footprint.rotation_degrees) == (
+        10.0,
+        20.0,
+        90.0,
+    )
+    assert not hasattr(footprint, "pins")
+    assert not hasattr(footprint, "nets")
+
+
+def test_native_observation_unknown_version_is_inventory_only() -> None:
+    result = kicad_parser_module.observe_kicad_pcb_bytes(
+        "demo.kicad_pcb", _native_board(version="20990101")
+    )
+
+    assert result.native_format_version == "UNKNOWN"
+    assert result.footprints == ()
+    assert (result.issues[0].kind, result.issues[0].code) == (
+        "UNKNOWN",
+        "UNSUPPORTED_FORMAT_VERSION",
+    )
+
+
+def test_native_observation_missing_uuid_is_loss_without_identity_guess() -> None:
+    result = kicad_parser_module.observe_kicad_pcb_bytes(
+        "demo.kicad_pcb", _native_board(uuid=None)
+    )
+
+    assert result.footprints == ()
+    assert (result.issues[0].kind, result.issues[0].code) == (
+        "LOSS",
+        "FOOTPRINT_UUID_MISSING",
+    )
+
+
+def test_native_observation_duplicate_uuid_is_conflict_not_two_objects() -> None:
+    source = _native_board().decode("utf-8")
+    first = source.index('(footprint "Library:Part"')
+    footprint = source[first:-1]
+    source = source[:-1] + footprint + ")"
+
+    result = kicad_parser_module.observe_kicad_pcb_bytes(
+        "demo.kicad_pcb", source.encode("utf-8")
+    )
+
+    assert result.footprints == ()
+    assert "DUPLICATE_FOOTPRINT_UUID" in {issue.code for issue in result.issues}
+
+
+def test_native_observation_uuid_identity_is_case_insensitive() -> None:
+    source = _native_board().decode()
+    first = source.index('(footprint "Library:Part"')
+    footprint = source[first:-1]
+    source = source[:-1] + footprint.replace(
+        "01234567-89ab-4cde-8f01-23456789abcd",
+        "01234567-89AB-4CDE-8F01-23456789ABCD",
+    ) + ")"
+
+    result = kicad_parser_module.observe_kicad_pcb_bytes(
+        "demo.kicad_pcb", source.encode()
+    )
+
+    assert result.footprints == ()
+    assert "DUPLICATE_FOOTPRINT_UUID" in {issue.code for issue in result.issues}
 
 
 def test_kicad_parser_extracts_complete_supported_structure(tmp_path: Path) -> None:
@@ -65,7 +158,26 @@ def test_kicad_parser_extracts_complete_supported_structure(tmp_path: Path) -> N
         "name": "Ground fill",
         "net_name": "GND",
         "layers": ["F.Cu"],
+        "polygon_points": [],
     }
+
+
+def test_kicad_parser_does_not_modify_source(tmp_path: Path) -> None:
+    path = tmp_path / "demo.kicad_pcb"
+    path.write_bytes(COMPLETE_KICAD_BOARD.encode("utf-8"))
+    attachment = InputLoader(tmp_path).load(
+        path.name,
+        attachment_id="read-only-board",
+        content_type="application/x-kicad-pcb",
+    )
+    parser = KiCadPCBParser(
+        RootedPCBSourceResolver(tmp_path, {attachment.id: path.name})
+    )
+    original = path.read_bytes()
+    model = parser.parse(attachment)
+
+    assert model.components
+    assert path.read_bytes() == original
 
 
 def test_kicad_parser_supports_legacy_module_labels(tmp_path: Path) -> None:
@@ -75,6 +187,30 @@ def test_kicad_parser_supports_legacy_module_labels(tmp_path: Path) -> None:
     assert model.components[0].value == "STM32F103"
     assert model.components[0].library == "Package_QFP"
     assert model.components[0].footprint == "LQFP-48"
+
+
+def test_kicad_parser_collapses_identical_stacked_pads(tmp_path: Path) -> None:
+    model = _parse(tmp_path, STACKED_PAD_BOARD)
+
+    assert [(pin.number, pin.net_name) for pin in model.components[0].pins] == [
+        ("1", "BUTTON"),
+    ]
+
+
+def test_kicad_parser_preserves_zone_polygon_geometry(tmp_path: Path) -> None:
+    content = COMPLETE_KICAD_BOARD.replace(
+        '(zone (net 1) (net_name "GND") (layer "F.Cu") (name "Ground fill"))',
+        '(zone (net 1) (net_name "GND") (layer "F.Cu") (name "Ground fill") '
+        '(polygon (pts (xy 0 0) (xy 10 0) (xy 10 10) (xy 0 10))))',
+    )
+    model = _parse(tmp_path, content)
+
+    assert model.zones[0].polygon_points == (
+        (0.0, 0.0),
+        (10.0, 0.0),
+        (10.0, 10.0),
+        (0.0, 10.0),
+    )
 
 
 def test_kicad_parser_normalizes_uppercase_extension_in_board_name(
@@ -159,6 +295,43 @@ def test_kicad_parser_rejects_size_change_after_metadata_load(tmp_path: Path) ->
     parser = KiCadPCBParser(
         RootedPCBSourceResolver(tmp_path, {attachment.id: path.name})
     )
+
+    with pytest.raises(PCBParseError, match="PCB source validation failed"):
+        parser.parse(attachment)
+
+
+def test_kicad_parser_rejects_source_change_during_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "changed-during-read.kicad_pcb"
+    path.write_text(COMPLETE_KICAD_BOARD, encoding="utf-8")
+    attachment = InputLoader(tmp_path).load(
+        path.name,
+        attachment_id="changed-during-read",
+        content_type="application/x-kicad-pcb",
+    )
+    parser = KiCadPCBParser(
+        RootedPCBSourceResolver(tmp_path, {attachment.id: path.name})
+    )
+    actual_fstat = kicad_parser_module.os.fstat
+    calls = 0
+
+    def changed_fstat(descriptor: int) -> object:
+        nonlocal calls
+        original = actual_fstat(descriptor)
+        calls += 1
+        if calls == 1:
+            return original
+        return SimpleNamespace(
+            st_mode=original.st_mode,
+            st_size=original.st_size,
+            st_dev=original.st_dev,
+            st_ino=original.st_ino,
+            st_mtime_ns=original.st_mtime_ns + 1,
+            st_ctime_ns=original.st_ctime_ns,
+        )
+
+    monkeypatch.setattr(kicad_parser_module.os, "fstat", changed_fstat)
 
     with pytest.raises(PCBParseError, match="PCB source validation failed"):
         parser.parse(attachment)

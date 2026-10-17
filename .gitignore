@@ -8,3 +8,5 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+acceptance/esp32-s3-sensor-gateway/acceptance-manifest.json
+acceptance/esp32-s3-sensor-gateway/RUN-ESP32S3-*/

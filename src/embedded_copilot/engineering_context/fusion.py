@@ -1,280 +1,278 @@
 from __future__ import annotations
 
 import copy
-import hashlib
-import json
+from collections import defaultdict
 from typing import NamedTuple
 
+from .exceptions import EngineeringContextRejected
 from .models import (
-    ApprovedMemoryProjection,
+    ContextConflict,
     ContextSourceReference,
-    DatasheetMetadataProjection,
-    EngineeringContextItem,
-    VerifiedKnowledgeProjection,
+    ContextSourceType,
+    ContextVerificationStatus,
+    EngineeringContextEvidence,
+    EngineeringContextRequest,
+    EngineeringContextSnapshot,
+    MultimodalContextFusionRequest,
 )
-from .policy import ContextCategory, ContextPolicy, ContextSourceType
+from .projection import project_vision_observation
+from .ranking import rank_evidence
 
 
 class FusionResult(NamedTuple):
-    items: tuple[EngineeringContextItem, ...]
-    sources: tuple[ContextSourceReference, ...]
-    memory_fingerprint: str
+    snapshot: EngineeringContextSnapshot | None
 
 
-class ContextFusionService:
-    """Small facade around deterministic projection fusion."""
-
-    def fuse(self, **kwargs: object) -> FusionResult:
-        return fuse_projections(**kwargs)
-
-
-def _projection_fingerprint(values: tuple[str, ...], label: str) -> str:
-    payload = json.dumps(
-        {"label": label, "values": tuple(sorted(values))},
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return "sha256:" + hashlib.sha256(payload).hexdigest()
-
-
-def _source(
-    *,
-    source_type: ContextSourceType,
-    source_id: str,
-    source_reference: str,
-    source_fingerprint: str,
-    verification_status: str,
-    confidence: float,
-) -> ContextSourceReference:
-    return ContextSourceReference.create(
-        source_type=source_type,
-        source_id=source_id,
-        source_reference=source_reference,
-        source_fingerprint=source_fingerprint,
-        verification_status=verification_status,
-        confidence=confidence,
-    )
-
-
-def _item(
-    *,
-    item_id: str,
-    project_id: str,
-    category,
-    entity_name: str,
-    summary: str,
-    source: ContextSourceReference,
-    confidence: float,
-    verification_status: str,
-) -> EngineeringContextItem:
-    return EngineeringContextItem.create(
-        item_id=item_id,
-        project_id=project_id,
-        category=category,
-        entity_name=entity_name,
-        summary=summary,
-        source_references=(source,),
-        confidence=confidence,
-        verification_status=verification_status,
-    )
-
-
-def _memory_projection(
-    value: ApprovedMemoryProjection,
-) -> tuple[EngineeringContextItem | None, ContextSourceReference]:
-    source = _source(
-        source_type=ContextSourceType.ENGINEERING_MEMORY,
-        source_id=f"memory-{value.memory_id}",
-        source_reference=value.source_reference,
-        source_fingerprint=value.fingerprint,
-        verification_status="APPROVED",
-        confidence=value.confidence,
-    )
-    category = ContextPolicy.category_for_memory_type(value.memory_type)
-    if category is None:
-        return None, source
-    return (
-        _item(
-            item_id=f"memory-{value.memory_id}",
-            project_id=value.project_id,
-            category=category,
-            entity_name=value.memory_id,
-            summary=value.summary,
-            source=source,
-            confidence=value.confidence,
-            verification_status="APPROVED",
-        ),
-        source,
-    )
-
-
-def _graph_projection(
-    graph: object,
-) -> tuple[tuple[EngineeringContextItem, ...], tuple[ContextSourceReference, ...]]:
-    items: list[EngineeringContextItem] = []
-    sources: list[ContextSourceReference] = []
-    for node in graph.nodes:
-        source = _source(
-            source_type=ContextSourceType.KNOWLEDGE_GRAPH,
-            source_id=f"graph-{node.node_id}",
-            source_reference=node.source_reference,
-            source_fingerprint=node.fingerprint,
-            verification_status=node.verification_status,
-            confidence=node.confidence,
+def _checked_evidence(
+    values: tuple[EngineeringContextEvidence, ...],
+    request: EngineeringContextRequest,
+    allowed_sources: frozenset[ContextSourceType],
+) -> tuple[EngineeringContextEvidence, ...]:
+    if type(values) is not tuple:
+        raise TypeError("context evidence must be a tuple")
+    checked: list[EngineeringContextEvidence] = []
+    for value in copy.deepcopy(values):
+        if type(value) is not EngineeringContextEvidence:
+            raise TypeError("context evidence is invalid")
+        item = EngineeringContextEvidence.model_validate(
+            copy.deepcopy(value.model_dump(mode="python"))
         )
-        sources.append(source)
-        category = ContextPolicy.category_for_graph_type(node.node_type.value)
-        if category is not None:
-            items.append(
-                _item(
-                    item_id=node.node_id,
-                    project_id=node.project_id,
-                    category=category,
-                    entity_name=node.entity_name,
-                    summary=node.summary,
-                    source=source,
-                    confidence=node.confidence,
-                    verification_status=node.verification_status,
+        if item.project_id != request.project_id or item.tenant_id != request.tenant_id:
+            raise ValueError("context evidence identity binding is invalid")
+        if item.source_type not in allowed_sources:
+            raise ValueError("context evidence source binding is invalid")
+        checked.append(item)
+    return tuple(checked)
+
+
+def _merge_evidence(
+    values: tuple[EngineeringContextEvidence, ...],
+) -> tuple[EngineeringContextEvidence, ...]:
+    by_id: dict[str, EngineeringContextEvidence] = {}
+    for item in values:
+        previous = by_id.get(item.evidence_id)
+        if previous is None:
+            by_id[item.evidence_id] = item
+            continue
+        if previous.fingerprint != item.fingerprint:
+            raise ValueError("duplicate context evidence has conflicting fingerprints")
+    return tuple(by_id[key] for key in sorted(by_id))
+
+
+def _explicit_conflicts(
+    values: tuple[EngineeringContextEvidence, ...],
+) -> tuple[ContextConflict, ...]:
+    grouped: defaultdict[tuple[str, str], list[EngineeringContextEvidence]] = defaultdict(list)
+    for item in values:
+        if item.fact_key is not None and item.fact_value is not None:
+            grouped[(item.project_id, item.fact_key.casefold())].append(item)
+    conflicts: dict[str, ContextConflict] = {}
+    for group in grouped.values():
+        for index, left in enumerate(sorted(group, key=lambda item: item.evidence_id)):
+            for right in sorted(group, key=lambda item: item.evidence_id)[index + 1 :]:
+                if left.fact_value.casefold() == right.fact_value.casefold():
+                    continue
+                conflict = ContextConflict.create(
+                    project_id=left.project_id,
+                    source_a=left.evidence_id,
+                    source_b=right.evidence_id,
+                    reason="explicit fact key has conflicting values",
                 )
-            )
-    return tuple(items), tuple(sources)
+                conflicts[conflict.conflict_id] = conflict
+    return tuple(conflicts[key] for key in sorted(conflicts))
 
 
-def _knowledge_projection(
-    value: VerifiedKnowledgeProjection,
-) -> tuple[EngineeringContextItem, ContextSourceReference]:
-    source = _source(
-        source_type=ContextSourceType.KNOWLEDGE_EVOLUTION,
-        source_id=value.source_id,
-        source_reference=value.source_reference,
-        source_fingerprint=value.source_fingerprint,
-        verification_status=value.verification_status,
-        confidence=value.confidence,
-    )
-    return (
-        _item(
-            item_id=f"knowledge-{value.source_id}",
-            project_id=value.project_id,
-            category=value.category,
-            entity_name=value.entity_name,
-            summary=value.summary,
-            source=source,
-            confidence=value.confidence,
-            verification_status=value.verification_status,
-        ),
-        source,
-    )
+def _status(
+    values: tuple[EngineeringContextEvidence, ...],
+    conflicts: tuple[ContextConflict, ...],
+) -> ContextVerificationStatus:
+    if conflicts:
+        return ContextVerificationStatus.REQUIRES_REVIEW
+    statuses = {value.verification_status for value in values}
+    if ContextVerificationStatus.UNVERIFIED in statuses:
+        return ContextVerificationStatus.UNVERIFIED
+    if ContextVerificationStatus.PROJECTED in statuses:
+        return ContextVerificationStatus.PROJECTED
+    if (
+        ContextVerificationStatus.APPROVED in statuses
+        and ContextVerificationStatus.VERIFIED in statuses
+    ):
+        return ContextVerificationStatus.VERIFIED
+    if statuses == {ContextVerificationStatus.APPROVED}:
+        return ContextVerificationStatus.APPROVED
+    return ContextVerificationStatus.VERIFIED
 
 
-def _datasheet_projection(
-    value: DatasheetMetadataProjection,
-) -> tuple[EngineeringContextItem, ContextSourceReference]:
-    source = _source(
-        source_type=ContextSourceType.DATASHEET_METADATA,
-        source_id=value.source_id,
-        source_reference=value.source_reference,
-        source_fingerprint=value.source_fingerprint,
-        verification_status=value.verification_status,
-        confidence=value.confidence,
-    )
-    return (
-        _item(
-            item_id=f"datasheet-{value.source_id}",
-            project_id=value.project_id,
-            category=ContextCategory.COMPONENT,
-            entity_name=value.component,
-            summary=value.property,
-            source=source,
-            confidence=value.confidence,
-            verification_status=value.verification_status,
-        ),
-        source,
-    )
+def _provenance(
+    values: tuple[EngineeringContextEvidence, ...],
+) -> tuple[ContextSourceReference, ...]:
+    sources = {item.evidence_id: item.source() for item in values}
+    return tuple(sources[key] for key in sorted(sources))
 
 
 def fuse_projections(
     *,
-    project_id: str,
-    memories: tuple[ApprovedMemoryProjection, ...],
-    graph: object | None,
-    knowledge: tuple[VerifiedKnowledgeProjection, ...] = (),
-    datasheet: tuple[DatasheetMetadataProjection, ...] = (),
-) -> FusionResult:
-    items: list[EngineeringContextItem] = []
-    sources: list[ContextSourceReference] = []
-    memory_fingerprints: list[str] = []
-
-    for value in copy.deepcopy(memories):
-        checked = ApprovedMemoryProjection.model_validate(value)
-        if checked.project_id != project_id or checked.status != "APPROVED":
-            raise ValueError("approved memory projection binding is invalid")
-        item, source = _memory_projection(checked)
-        memory_fingerprints.append(checked.fingerprint)
-        sources.append(source)
-        if item is not None:
-            items.append(item)
-
-    if graph is not None:
-        graph_items, graph_sources = _graph_projection(graph)
-        if graph.project_id != project_id:
-            raise ValueError("graph projection binding is invalid")
-        items.extend(graph_items)
-        sources.extend(graph_sources)
-
-    for value in copy.deepcopy(knowledge):
-        checked = VerifiedKnowledgeProjection.model_validate(value)
-        if checked.project_id != project_id:
-            raise ValueError("knowledge projection binding is invalid")
-        item, source = _knowledge_projection(checked)
-        items.append(item)
-        sources.append(source)
-
-    for value in copy.deepcopy(datasheet):
-        checked = DatasheetMetadataProjection.model_validate(value)
-        if checked.project_id != project_id:
-            raise ValueError("datasheet projection binding is invalid")
-        item, source = _datasheet_projection(checked)
-        items.append(item)
-        sources.append(source)
-
-    item_by_id: dict[str, EngineeringContextItem] = {}
-    for item in items:
-        previous = item_by_id.get(item.item_id)
-        if previous is None:
-            item_by_id[item.item_id] = item
-            continue
-        references = {
-            reference.source_id: reference
-            for reference in (*previous.source_references, *item.source_references)
-        }
-        item_by_id[item.item_id] = EngineeringContextItem.create(
-            item_id=previous.item_id,
-            project_id=previous.project_id,
-            category=previous.category,
-            entity_name=previous.entity_name,
-            summary=previous.summary,
-            source_references=tuple(
-                references[key] for key in sorted(references)
-            ),
-            confidence=min(previous.confidence, item.confidence),
-            verification_status=(
-                "APPROVED"
-                if previous.verification_status == item.verification_status == "APPROVED"
-                else "VERIFIED"
-                if {previous.verification_status, item.verification_status}
-                <= {"APPROVED", "VERIFIED"}
-                else "PROJECTED"
-            ),
-        )
-    source_by_id = {source.source_id: source for source in sources}
-    return FusionResult(
-        items=tuple(item_by_id[key] for key in sorted(item_by_id)),
-        sources=tuple(source_by_id[key] for key in sorted(source_by_id)),
-        memory_fingerprint=_projection_fingerprint(
-            tuple(memory_fingerprints), "engineering-memory"
+    request: EngineeringContextRequest,
+    memory: tuple[EngineeringContextEvidence, ...],
+    graph: tuple[EngineeringContextEvidence, ...],
+    knowledge: tuple[EngineeringContextEvidence, ...],
+    multimodal: tuple[EngineeringContextEvidence, ...],
+    graph_conflicts: tuple[ContextConflict, ...] = (),
+) -> EngineeringContextSnapshot | None:
+    groups = (
+        _checked_evidence(
+            memory, request, frozenset({ContextSourceType.ENGINEERING_MEMORY})
         ),
+        _checked_evidence(
+            graph, request, frozenset({ContextSourceType.KNOWLEDGE_GRAPH})
+        ),
+        _checked_evidence(
+            knowledge,
+            request,
+            frozenset(
+                {
+                    ContextSourceType.KNOWLEDGE_GATEWAY,
+                    ContextSourceType.KNOWLEDGE_EVOLUTION,
+                    ContextSourceType.DATASHEET_METADATA,
+                    ContextSourceType.FIRMWARE_SOURCE,
+                    ContextSourceType.KNOWLEDGE,
+                    ContextSourceType.DEBUG,
+                    ContextSourceType.HARDWARE,
+                    ContextSourceType.PCB,
+                    ContextSourceType.REQUIREMENT,
+                    ContextSourceType.ARCHITECTURE,
+                    ContextSourceType.VISION_OBSERVATION,
+                }
+            ),
+        ),
+        _checked_evidence(
+            multimodal,
+            request,
+            frozenset({ContextSourceType.MULTIMODAL_OBSERVATION}),
+        ),
+    )
+    merged = _merge_evidence(tuple(item for group in groups for item in group))
+    if not merged:
+        return None
+
+    conflicts = list(_explicit_conflicts(merged))
+    if type(graph_conflicts) is not tuple:
+        raise TypeError("graph conflicts must be a tuple")
+    for value in copy.deepcopy(graph_conflicts):
+        if type(value) is not ContextConflict:
+            raise TypeError("context conflict is invalid")
+        conflict = ContextConflict.model_validate(
+            copy.deepcopy(value.model_dump(mode="python"))
+        )
+        if conflict.project_id != request.project_id:
+            raise ValueError("context conflict project binding is invalid")
+        evidence_ids = {item.evidence_id for item in merged}
+        if conflict.source_a not in evidence_ids or conflict.source_b not in evidence_ids:
+            raise ValueError("context conflict references unknown evidence")
+        conflicts.append(conflict)
+    conflict_by_id = {value.conflict_id: value for value in conflicts}
+    checked_conflicts = tuple(conflict_by_id[key] for key in sorted(conflict_by_id))
+
+    ranked = rank_evidence(merged, request.task, request.constraints)
+    by_source = {
+        ContextSourceType.ENGINEERING_MEMORY: tuple(
+            item for item in ranked if item.source_type is ContextSourceType.ENGINEERING_MEMORY
+        ),
+        ContextSourceType.KNOWLEDGE_GRAPH: tuple(
+            item for item in ranked if item.source_type is ContextSourceType.KNOWLEDGE_GRAPH
+        ),
+        ContextSourceType.KNOWLEDGE_GATEWAY: tuple(
+            item
+            for item in ranked
+            if item.source_type
+            in {
+                ContextSourceType.KNOWLEDGE_GATEWAY,
+                ContextSourceType.KNOWLEDGE_EVOLUTION,
+                ContextSourceType.DATASHEET_METADATA,
+                ContextSourceType.FIRMWARE_SOURCE,
+                ContextSourceType.KNOWLEDGE,
+                ContextSourceType.DEBUG,
+                ContextSourceType.HARDWARE,
+                ContextSourceType.PCB,
+                ContextSourceType.REQUIREMENT,
+                ContextSourceType.ARCHITECTURE,
+                ContextSourceType.VISION_OBSERVATION,
+            }
+        ),
+        ContextSourceType.MULTIMODAL_OBSERVATION: tuple(
+            item
+            for item in ranked
+            if item.source_type is ContextSourceType.MULTIMODAL_OBSERVATION
+        ),
+    }
+    known_confidences = tuple(
+        item.confidence for item in merged if item.confidence is not None
+    )
+    confidence = min(known_confidences) if known_confidences else 0.0
+    return EngineeringContextSnapshot.create(
+        project_id=request.project_id,
+        tenant_id=request.tenant_id,
+        task_description=request.task,
+        memory_evidence=by_source[ContextSourceType.ENGINEERING_MEMORY],
+        graph_evidence=by_source[ContextSourceType.KNOWLEDGE_GRAPH],
+        knowledge_evidence=by_source[ContextSourceType.KNOWLEDGE_GATEWAY],
+        multimodal_evidence=by_source[ContextSourceType.MULTIMODAL_OBSERVATION],
+        conflicts=checked_conflicts,
+        confidence=confidence,
+        provenance=_provenance(merged),
+        verification_status=_status(merged, checked_conflicts),
     )
 
 
-__all__ = ("ContextFusionService", "FusionResult", "fuse_projections")
+class EngineeringContextFusionService:
+    def fuse(self, **kwargs: object) -> EngineeringContextSnapshot | None:
+        return fuse_projections(**kwargs)
+
+
+class ContextFusionService(EngineeringContextFusionService):
+    pass
+
+
+class MultimodalContextFusionService:
+    """Read-only Vision observation projection into an existing Context snapshot."""
+
+    def fuse(
+        self, request: MultimodalContextFusionRequest
+    ) -> EngineeringContextSnapshot | None:
+        try:
+            if type(request) is not MultimodalContextFusionRequest:
+                raise TypeError("multimodal fusion request is invalid")
+            checked = MultimodalContextFusionRequest.model_validate(
+                copy.deepcopy(request.model_dump(mode="python"))
+            )
+            vision = project_vision_observation(
+                checked.evidence,
+                project_id=checked.project_id,
+                source_reference=checked.source_reference,
+                target_id=checked.target_id,
+            )
+            snapshot = checked.snapshot
+            return fuse_projections(
+                request=EngineeringContextRequest(
+                    project_id=checked.project_id,
+                    task=snapshot.task_description,
+                ),
+                memory=snapshot.memory_evidence,
+                graph=snapshot.graph_evidence,
+                knowledge=snapshot.knowledge_evidence,
+                multimodal=(*snapshot.multimodal_evidence, *vision),
+                graph_conflicts=snapshot.conflicts,
+            )
+        except EngineeringContextRejected:
+            raise
+        except (TypeError, ValueError) as error:
+            raise EngineeringContextRejected() from error
+
+
+__all__ = (
+    "ContextFusionService",
+    "EngineeringContextFusionService",
+    "FusionResult",
+    "MultimodalContextFusionService",
+    "fuse_projections",
+)

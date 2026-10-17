@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "embedded-copilot-agent"
-version = "0.39.0"
-description = "Foundation Agent System for embedded engineering assistance"
+version = "7.1.0"
+description = "Embedded Copilot production desktop release"
 requires-python = ">=3.11,<3.12"
 dependencies = [
     "tree-sitter>=0.25,<0.26",
@@ -14,16 +14,46 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+model-gateway = [
+    "httpx>=0.27,<1.0",
+    "pydantic>=2.9,<3.0",
+]
+runtime = [
+    "chromadb>=0.5,<2.0",
+    "fastapi>=0.115,<1.0",
+    "langchain>=0.3,<2.0",
+    "langchain-core>=0.3,<2.0",
+    "langchain-openai>=0.2,<2.0",
+    "langgraph>=0.2,<2.0",
+    "langgraph-checkpoint>=2.0,<3.0",
+    "pillow>=10.4,<13.0",
+    "pydantic-settings>=2.5,<3.0",
+    "pymupdf>=1.24,<2.0",
+    "pywebview>=5.4,<7.0; platform_system == 'Windows'",
+    "pythonnet>=3.0,<4.0; platform_system == 'Windows'",
+    "streamlit>=1.41,<2.0",
+    "uvicorn>=0.30,<1.0",
+]
 dev = [
+    "embedded-copilot-agent[model-gateway]",
+    "embedded-copilot-agent[runtime]",
     "pytest",
     "pytest-cov",
     "ruff",
     "black",
+    "pyinstaller>=6.0,<7.0",
 ]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.exclude-package-data]
+"embedded_copilot.component_recommendation" = ["resources/*"]
+"embedded_copilot.component_recommendation.resources" = ["*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --basetemp=.pytest_tmp"
+addopts = "-ra --basetemp=.pytest_tmp --import-mode=importlib"
+markers = [
+    "real_toolchain: execute the canonical firmware build with the installed trusted toolchain",
+]

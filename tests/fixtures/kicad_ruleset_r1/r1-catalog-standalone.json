@@ -1,0 +1,167 @@
+{
+  "kind": "SYNTHETIC_R1_COMPATIBILITY_FIXTURE",
+  "project_id": "project-521af44b-ec7e-4128-a482-2976137bf579",
+  "entry": "native/layout.kicad_pcb",
+  "revision": {
+    "status": "IMPORTED_OBSERVATION",
+    "backend": "KICAD",
+    "can_modify": false,
+    "import_revision_fingerprint": "sha256:423bd06b65845a085a9596e944c7d6c5ad7deaaae712e6d1c4777f92c64b7eb3",
+    "issues": [
+      {
+        "blocks_mutation": true,
+        "code": "STANDALONE_BOARD",
+        "kind": "UNKNOWN",
+        "locator": "native/layout.kicad_pcb"
+      }
+    ],
+    "manifest": [
+      {
+        "byte_size": 143,
+        "kind": "FILE",
+        "relative_path": "native/layout.kicad_pcb",
+        "sha256": "b4fd94ab304e4ec9823b032dd9260f01fdffe45423b1dd9f82f68f003ae4a090"
+      }
+    ],
+    "native_entry_relative_path": "native/layout.kicad_pcb",
+    "native_format_family": "KICAD_PROJECT_DIRECTORY",
+    "native_format_versions": {
+      "native/layout.kicad_pcb": "20240108"
+    },
+    "objects": [
+      {
+        "library_id": "Library:Part",
+        "locator": "/kicad_pcb/footprint[0]",
+        "native_id": "01234567-89ab-4cde-8f01-23456789abcd",
+        "object_type": "FOOTPRINT",
+        "position_x_mm": 10.0,
+        "position_y_mm": 20.0,
+        "reference": "U1",
+        "rotation_degrees": 90.0,
+        "source_file": "native/layout.kicad_pcb"
+      }
+    ],
+    "parser_ruleset_fingerprint": "sha256:f1f2b63507bef63a3707fdde25bb030891cc2abbeecde2e8f7def59075ec591c",
+    "parser_ruleset_id": "kicad-pcb-footprint-20240108-r1",
+    "project_binding_fingerprint": "sha256:b49bfded9b2b4d0fcf32fa5e43be1586f80725364643f2067e47849a53c78314",
+    "project_id": "project-521af44b-ec7e-4128-a482-2976137bf579",
+    "requester": "owner-1",
+    "scope_policy_id": "eda-scope-r1",
+    "scope_root_relative_path": "native",
+    "semantic_completeness": "PARTIAL",
+    "source_set_fingerprint": "sha256:888068da8513e0170cffb9d7e0a71299127681c037a2ba304ad7a74e22fcfd83",
+    "supported_subset_fingerprint": "sha256:01e5fed5cebd9061657e2992d457b5eb948693cb5fc26a6d81a8880d0c1fc47e",
+    "supported_subset_id": "kicad-footprint-placement-r1",
+    "tenant_id": "tenant-1",
+    "verified": false,
+    "import_revision_id": "eda-import-bbb7cd1cef5344e1a95fe57678ab67e8",
+    "created_at": "2026-09-30T08:00:00+00:00",
+    "active": true,
+    "source_currentness": "CURRENT",
+    "observation_currentness": "CURRENT",
+    "commit_outcome": "CREATED"
+  },
+  "pending_preview": {
+    "status": "PREVIEW",
+    "preview_id": "eda-preview-49dc214f-2e93-45ee-b3bf-457daf4f48ed",
+    "preview_fingerprint": "sha256:15e20c6042e22132630beeb297ff309a50a2a74eb724d35cbefa1a2275457498",
+    "expires_at": "2026-09-30T08:10:00+00:00",
+    "backend": "KICAD",
+    "native_entry_relative_path": "native/layout.kicad_pcb",
+    "native_format_family": "KICAD_PROJECT_DIRECTORY",
+    "native_format_versions": {
+      "native/layout.kicad_pcb": "20240108"
+    },
+    "source_set_fingerprint": "sha256:888068da8513e0170cffb9d7e0a71299127681c037a2ba304ad7a74e22fcfd83",
+    "parser_ruleset_id": "kicad-pcb-footprint-20240108-r1",
+    "supported_subset_id": "kicad-footprint-placement-r1",
+    "semantic_completeness": "PARTIAL",
+    "manifest": [
+      {
+        "relative_path": "native/layout.kicad_pcb",
+        "kind": "FILE",
+        "byte_size": 143,
+        "sha256": "b4fd94ab304e4ec9823b032dd9260f01fdffe45423b1dd9f82f68f003ae4a090"
+      }
+    ],
+    "objects": [
+      {
+        "object_type": "FOOTPRINT",
+        "source_file": "native/layout.kicad_pcb",
+        "native_id": "01234567-89ab-4cde-8f01-23456789abcd",
+        "locator": "/kicad_pcb/footprint[0]",
+        "library_id": "Library:Part",
+        "reference": "U1",
+        "position_x_mm": 10.0,
+        "position_y_mm": 20.0,
+        "rotation_degrees": 90.0
+      }
+    ],
+    "issues": [
+      {
+        "kind": "UNKNOWN",
+        "code": "STANDALONE_BOARD",
+        "locator": "native/layout.kicad_pcb",
+        "blocks_mutation": true
+      }
+    ],
+    "verified": false,
+    "can_modify": false
+  },
+  "rows": {
+    "projects": [
+      {
+        "project_id": "project-521af44b-ec7e-4128-a482-2976137bf579",
+        "tenant_id": "tenant-1",
+        "relative_path": "board",
+        "location_id": "default-project-root",
+        "directory_name": "board",
+        "creation_mode": "CREATE_NEW",
+        "body": "{\"fingerprint\":\"sha256:480249482773b7bd14846cc539096213a3e4cc25cbb1d558748be76f77322164\",\"project_id\":\"project-521af44b-ec7e-4128-a482-2976137bf579\",\"tenant_id\":\"tenant-1\",\"name\":\"Board\",\"location_id\":\"default-project-root\",\"directory_name\":\"board\",\"creation_mode\":\"CREATE_NEW\",\"relative_path\":\"board\",\"project_type\":\"STM32\",\"initialization_status\":\"READY\",\"platform\":\"STM32\",\"version\":null,\"branch\":null,\"failure_code\":null,\"created_at\":\"2026-09-30T08:00:00Z\",\"updated_at\":\"2026-09-30T08:00:00Z\",\"last_activity_at\":\"2026-09-30T08:00:00Z\"}"
+      }
+    ],
+    "project_owners": [
+      {
+        "project_id": "project-521af44b-ec7e-4128-a482-2976137bf579",
+        "requester": "owner-1"
+      }
+    ],
+    "project_eda_import_revisions": [
+      {
+        "import_revision_id": "eda-import-bbb7cd1cef5344e1a95fe57678ab67e8",
+        "project_id": "project-521af44b-ec7e-4128-a482-2976137bf579",
+        "tenant_id": "tenant-1",
+        "backend": "KICAD",
+        "native_entry_relative_path": "native/layout.kicad_pcb",
+        "import_revision_fingerprint": "sha256:423bd06b65845a085a9596e944c7d6c5ad7deaaae712e6d1c4777f92c64b7eb3",
+        "source_set_fingerprint": "sha256:888068da8513e0170cffb9d7e0a71299127681c037a2ba304ad7a74e22fcfd83",
+        "parser_ruleset_id": "kicad-pcb-footprint-20240108-r1",
+        "supported_subset_id": "kicad-footprint-placement-r1",
+        "active": 1,
+        "created_at": "2026-09-30T08:00:00+00:00",
+        "body": "{\"backend\":\"KICAD\",\"can_modify\":false,\"import_revision_fingerprint\":\"sha256:423bd06b65845a085a9596e944c7d6c5ad7deaaae712e6d1c4777f92c64b7eb3\",\"issues\":[{\"blocks_mutation\":true,\"code\":\"STANDALONE_BOARD\",\"kind\":\"UNKNOWN\",\"locator\":\"native/layout.kicad_pcb\"}],\"manifest\":[{\"byte_size\":143,\"kind\":\"FILE\",\"relative_path\":\"native/layout.kicad_pcb\",\"sha256\":\"b4fd94ab304e4ec9823b032dd9260f01fdffe45423b1dd9f82f68f003ae4a090\"}],\"native_entry_relative_path\":\"native/layout.kicad_pcb\",\"native_format_family\":\"KICAD_PROJECT_DIRECTORY\",\"native_format_versions\":{\"native/layout.kicad_pcb\":\"20240108\"},\"objects\":[{\"library_id\":\"Library:Part\",\"locator\":\"/kicad_pcb/footprint[0]\",\"native_id\":\"01234567-89ab-4cde-8f01-23456789abcd\",\"object_type\":\"FOOTPRINT\",\"position_x_mm\":10.0,\"position_y_mm\":20.0,\"reference\":\"U1\",\"rotation_degrees\":90.0,\"source_file\":\"native/layout.kicad_pcb\"}],\"parser_ruleset_fingerprint\":\"sha256:f1f2b63507bef63a3707fdde25bb030891cc2abbeecde2e8f7def59075ec591c\",\"parser_ruleset_id\":\"kicad-pcb-footprint-20240108-r1\",\"project_binding_fingerprint\":\"sha256:b49bfded9b2b4d0fcf32fa5e43be1586f80725364643f2067e47849a53c78314\",\"project_id\":\"project-521af44b-ec7e-4128-a482-2976137bf579\",\"requester\":\"owner-1\",\"schema\":\"eda-import-revision-v1\",\"scope_policy_id\":\"eda-scope-r1\",\"scope_root_relative_path\":\"native\",\"semantic_completeness\":\"PARTIAL\",\"source_set_fingerprint\":\"sha256:888068da8513e0170cffb9d7e0a71299127681c037a2ba304ad7a74e22fcfd83\",\"supported_subset_fingerprint\":\"sha256:01e5fed5cebd9061657e2992d457b5eb948693cb5fc26a6d81a8880d0c1fc47e\",\"supported_subset_id\":\"kicad-footprint-placement-r1\",\"tenant_id\":\"tenant-1\",\"verified\":false}"
+      }
+    ],
+    "project_eda_import_previews": [
+      {
+        "preview_id": "eda-preview-49dc214f-2e93-45ee-b3bf-457daf4f48ed",
+        "project_id": "project-521af44b-ec7e-4128-a482-2976137bf579",
+        "tenant_id": "tenant-1",
+        "requester": "owner-1",
+        "backend": "KICAD",
+        "native_entry_relative_path": "native/layout.kicad_pcb",
+        "preview_fingerprint": "sha256:15e20c6042e22132630beeb297ff309a50a2a74eb724d35cbefa1a2275457498",
+        "expected_head_revision_id": "eda-import-bbb7cd1cef5344e1a95fe57678ab67e8",
+        "expected_head_revision_fingerprint": "sha256:423bd06b65845a085a9596e944c7d6c5ad7deaaae712e6d1c4777f92c64b7eb3",
+        "project_binding_fingerprint": "sha256:b49bfded9b2b4d0fcf32fa5e43be1586f80725364643f2067e47849a53c78314",
+        "expires_at": "2026-09-30T08:10:00+00:00",
+        "status": "OPEN",
+        "committed_revision_id": null,
+        "body": "{\"backend\":\"KICAD\",\"created_at\":\"2026-09-30T08:00:00+00:00\",\"expected_head_revision_fingerprint\":\"sha256:423bd06b65845a085a9596e944c7d6c5ad7deaaae712e6d1c4777f92c64b7eb3\",\"expected_head_revision_id\":\"eda-import-bbb7cd1cef5344e1a95fe57678ab67e8\",\"expires_at\":\"2026-09-30T08:10:00+00:00\",\"native_entry_relative_path\":\"native/layout.kicad_pcb\",\"preview_fingerprint\":\"sha256:15e20c6042e22132630beeb297ff309a50a2a74eb724d35cbefa1a2275457498\",\"preview_id\":\"eda-preview-49dc214f-2e93-45ee-b3bf-457daf4f48ed\",\"project_binding_fingerprint\":\"sha256:b49bfded9b2b4d0fcf32fa5e43be1586f80725364643f2067e47849a53c78314\",\"project_id\":\"project-521af44b-ec7e-4128-a482-2976137bf579\",\"requester\":\"owner-1\",\"revision\":{\"backend\":\"KICAD\",\"can_modify\":false,\"import_revision_fingerprint\":\"sha256:423bd06b65845a085a9596e944c7d6c5ad7deaaae712e6d1c4777f92c64b7eb3\",\"issues\":[{\"blocks_mutation\":true,\"code\":\"STANDALONE_BOARD\",\"kind\":\"UNKNOWN\",\"locator\":\"native/layout.kicad_pcb\"}],\"manifest\":[{\"byte_size\":143,\"kind\":\"FILE\",\"relative_path\":\"native/layout.kicad_pcb\",\"sha256\":\"b4fd94ab304e4ec9823b032dd9260f01fdffe45423b1dd9f82f68f003ae4a090\"}],\"native_entry_relative_path\":\"native/layout.kicad_pcb\",\"native_format_family\":\"KICAD_PROJECT_DIRECTORY\",\"native_format_versions\":{\"native/layout.kicad_pcb\":\"20240108\"},\"objects\":[{\"library_id\":\"Library:Part\",\"locator\":\"/kicad_pcb/footprint[0]\",\"native_id\":\"01234567-89ab-4cde-8f01-23456789abcd\",\"object_type\":\"FOOTPRINT\",\"position_x_mm\":10.0,\"position_y_mm\":20.0,\"reference\":\"U1\",\"rotation_degrees\":90.0,\"source_file\":\"native/layout.kicad_pcb\"}],\"parser_ruleset_fingerprint\":\"sha256:f1f2b63507bef63a3707fdde25bb030891cc2abbeecde2e8f7def59075ec591c\",\"parser_ruleset_id\":\"kicad-pcb-footprint-20240108-r1\",\"project_binding_fingerprint\":\"sha256:b49bfded9b2b4d0fcf32fa5e43be1586f80725364643f2067e47849a53c78314\",\"project_id\":\"project-521af44b-ec7e-4128-a482-2976137bf579\",\"requester\":\"owner-1\",\"schema\":\"eda-import-revision-v1\",\"scope_policy_id\":\"eda-scope-r1\",\"scope_root_relative_path\":\"native\",\"semantic_completeness\":\"PARTIAL\",\"source_set_fingerprint\":\"sha256:888068da8513e0170cffb9d7e0a71299127681c037a2ba304ad7a74e22fcfd83\",\"supported_subset_fingerprint\":\"sha256:01e5fed5cebd9061657e2992d457b5eb948693cb5fc26a6d81a8880d0c1fc47e\",\"supported_subset_id\":\"kicad-footprint-placement-r1\",\"tenant_id\":\"tenant-1\",\"verified\":false},\"selected_native_entries\":[],\"tenant_id\":\"tenant-1\"}"
+      }
+    ]
+  },
+  "source_files": {
+    "native/layout.kicad_pcb": "(kicad_pcb (version 20240108) (footprint \"Library:Part\" (uuid 01234567-89ab-4cde-8f01-23456789abcd) (at 10 20 90) (property \"Reference\" \"U1\")))"
+  }
+}

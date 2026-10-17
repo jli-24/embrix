@@ -4,8 +4,10 @@ import pytest
 from pydantic import ValidationError
 
 from embedded_copilot.engineering_knowledge import (
+    EngineeringRelation,
     EngineeringKnowledgeNode,
     NodeType,
+    RelationType,
 )
 
 
@@ -49,3 +51,30 @@ def test_contract_model_configuration_is_strict() -> None:
     assert node.model_config["strict"] is True
     assert node.model_config["extra"] == "forbid"
     assert node.model_config["revalidate_instances"] == "always"
+
+
+def test_relation_retains_evidence_provenance_and_verification_status() -> None:
+    relation = EngineeringRelation.create(
+        relation_id="relation-1",
+        source_node_id="memory-1",
+        target_node_id="memory-2",
+        relation_type=RelationType.USES,
+        confidence=0.9,
+        source_memory_id="memory-1",
+        provenance="decision:1",
+        evidence=("conversation:1",),
+        verification_status="APPROVED",
+    )
+    assert relation.provenance == "decision:1"
+    assert relation.evidence == ("conversation:1",)
+    assert relation.verification_status == "APPROVED"
+
+    values = relation.model_dump(mode="python")
+    values["evidence"] = ["conversation:1"]
+    with pytest.raises(ValidationError):
+        EngineeringRelation.model_validate(values)
+
+    values = relation.model_dump(mode="python")
+    values["provenance"] = "decision:2"
+    with pytest.raises(ValidationError):
+        EngineeringRelation.model_validate(values)

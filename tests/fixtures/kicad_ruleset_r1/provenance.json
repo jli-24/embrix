@@ -1,0 +1,25 @@
+{
+  "purpose": "synthetic fixed serialization vectors from hash-verified r1 writers",
+  "writer_source_sha256": {
+    "api/project_catalog_models.py": "a2fa3f59f1c36aa1b66c57a473f6812ca75861524e9a584d7a6c9b0e6b6dc33b",
+    "execution_worker/contracts.py": "5a3bcd8a589be2345c634ed0d81133634202e171f59f22daba1eced1f776ec74"
+  },
+  "real_engineering_evidence": false,
+  "vectors": [
+    {
+      "filename": "r1-api.json",
+      "sha256": "1126b968b5b591cab5d25ef0763ba36b3806f08ad7675affc22410acf59a8cd7",
+      "byte_size": 1646
+    },
+    {
+      "filename": "r1-operation.json",
+      "sha256": "237b36e65838da6b1843944c200e95e48a94529fb7bc28ed92d29348fd02ea64",
+      "byte_size": 2084
+    },
+    {
+      "filename": "r1-request.json",
+      "sha256": "7ca9ce0e14fff98f754c9fcea26c15fc8a78cba7dab00d4270a7b985687a2bc9",
+      "byte_size": 2098
+    }
+  ]
+}

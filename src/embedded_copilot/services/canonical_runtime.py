@@ -14,7 +14,12 @@ from embedded_copilot.agents.firmware import FirmwareAgent
 from embedded_copilot.agents.knowledge import KnowledgeAgent
 from embedded_copilot.agents.supervisor import supervisor_node
 from embedded_copilot.agents.workflow import build_workflow
-from embedded_copilot.rag.embedding import EmbeddingProvider, HashEmbedding
+from embedded_copilot.rag.embedding import (
+    EmbeddingProvider,
+    EmbeddingProviderError,
+    HashEmbedding,
+    OllamaEmbeddingAdapter,
+)
 from embedded_copilot.rag.hybrid_retriever import HybridRetriever
 from embedded_copilot.rag.index import index_chunks
 from embedded_copilot.rag.loader import DocumentLoadError, LoadedDocument, load_document
@@ -41,6 +46,20 @@ class RuntimeComponents:
     service: CopilotService
     health_status: Literal["ok", "degraded"]
     ingestion_errors: list[str]
+
+
+class _UnavailableRetriever:
+    """Fail-closed retriever used when the optional embedding capability is down."""
+
+    def retrieve(
+        self,
+        query: str,
+        *,
+        top_k: int,
+        score_threshold: float,
+    ) -> list[object]:
+        del query, top_k, score_threshold
+        raise RuntimeError("knowledge embedding is unavailable")
 
 
 # This is a whitelist for the Canonical Runtime, not a repository-wide registry.
@@ -72,6 +91,18 @@ def _build_llm(settings: Settings) -> LLMService:
 def _build_embedding(settings: Settings) -> EmbeddingProvider:
     if settings.embedding_provider == "local_hash":
         return HashEmbedding(dimension=settings.embedding_dimension)
+    if settings.embedding_provider == "ollama":
+        if settings.embedding_model is None:
+            raise RuntimeInitializationError(
+                "Ollama embeddings require embedding_model."
+            )
+        adapter = OllamaEmbeddingAdapter(
+            model=settings.embedding_model,
+            base_url=settings.ollama_base_url,
+            timeout_seconds=settings.request_timeout_seconds,
+        )
+        adapter.probe()
+        return adapter
     if settings.embedding_model is None or settings.openai_api_key is None:
         raise RuntimeInitializationError(
             "OpenAI-compatible embeddings require embedding_model and openai_api_key."
@@ -98,6 +129,7 @@ def build_canonical_runtime(
     settings: Settings,
     *,
     chroma_client: ClientAPI | None = None,
+    allow_unavailable_embedding: bool = False,
 ) -> RuntimeComponents:
     client = chroma_client or chromadb.PersistentClient(
         path=str(settings.chroma_path),
@@ -114,23 +146,38 @@ def build_canonical_runtime(
             documents.extend(load_document(path, source_root=settings.knowledge_dir))
         except DocumentLoadError:
             ingestion_errors.append(f"{path.name}: document_load_error")
-    if not documents:
+    if not documents and not (
+        allow_unavailable_embedding and settings.embedding_provider == "ollama"
+    ):
         raise RuntimeInitializationError("No knowledge document could be loaded.")
 
-    embedding = _build_embedding(settings)
-    chunks = split_documents(
-        documents,
-        chunk_size=settings.chunk_size,
-        chunk_overlap=settings.chunk_overlap,
-    )
-    active_sources = {document.source for document in documents}
-    index_chunks(
-        chunks,
-        collection,
-        embedding,
-        active_sources=active_sources,
-    )
-    vector_retriever = ChromaRetriever(collection=collection, embedding=embedding)
+    embedding: EmbeddingProvider | None
+    try:
+        embedding = _build_embedding(settings)
+    except (EmbeddingProviderError, RuntimeInitializationError, OSError, ValueError):
+        if not (
+            allow_unavailable_embedding and settings.embedding_provider == "ollama"
+        ):
+            raise
+        embedding = None
+        ingestion_errors.append("knowledge_embedding_unavailable")
+
+    if embedding is not None:
+        chunks = split_documents(
+            documents,
+            chunk_size=settings.chunk_size,
+            chunk_overlap=settings.chunk_overlap,
+        )
+        active_sources = {document.source for document in documents}
+        index_chunks(
+            chunks,
+            collection,
+            embedding,
+            active_sources=active_sources,
+        )
+        vector_retriever = ChromaRetriever(collection=collection, embedding=embedding)
+    else:
+        vector_retriever = _UnavailableRetriever()
     retriever = HybridRetriever(retriever=vector_retriever)
     llm = _build_llm(settings)
     document_tool = DocumentSearchTool(

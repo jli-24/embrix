@@ -1,5 +1,3 @@
-from __future__ import annotations
-
-from .contracts import EngineeringContextProviderPort
+from .ports import EngineeringContextProviderPort
 
 __all__ = ("EngineeringContextProviderPort",)

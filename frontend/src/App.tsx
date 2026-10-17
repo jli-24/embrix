@@ -59,6 +59,22 @@ import type { DigitalTwinSnapshot } from "./types/digitalTwin";
 import type { OptimizationAnalysis } from "./types/optimizationV26";
 import { DigitalTwinPanel } from "./components/digitalTwin/DigitalTwinPanel";
 import { OptimizationAnalysisPanel } from "./components/optimization/OptimizationAnalysisPanel";
+import { fetchKnowledgeSnapshot, queryKnowledge, KnowledgeRequestError } from "./api/knowledge";
+import type { EngineeringKnowledgeSnapshot, KnowledgeSuggestion } from "./types/knowledge";
+import { KnowledgeGraphPanel } from "./components/knowledge/KnowledgeGraphPanel";
+import { RecommendationPanel } from "./components/knowledge/RecommendationPanel";
+import { EngineeringHistoryPanel } from "./components/knowledge/EngineeringHistoryPanel";
+import { fetchEngineeringCompletion, EngineeringRequestError } from "./api/engineering";
+import type { EngineeringCompletionSnapshot } from "./types/engineering";
+import { RequirementPanel } from "./components/engineering/RequirementPanel";
+import { ArchitecturePanel } from "./components/engineering/ArchitecturePanel";
+import { InterfacePanel } from "./components/engineering/InterfacePanel";
+import { ReviewPanel } from "./components/engineering/ReviewPanel";
+import { analyzeMultimodal, MultimodalRequestError } from "./api/multimodal";
+import type { MultimodalAnalysisProjection } from "./types/multimodal";
+import { ObservationPanel as MultimodalObservationPanel } from "./components/multimodal/ObservationPanel";
+import { VisionResultPanel } from "./components/multimodal/VisionResultPanel";
+import { DocumentAnalysisPanel } from "./components/multimodal/DocumentAnalysisPanel";
 
 function rejectAutonomousAction(actionId: string, body: object) {
   return rejectAutonomousActionRequest(actionId, { ...body, action_id: actionId });
@@ -120,6 +136,14 @@ export default function App() {
   const [digitalTwinError, setDigitalTwinError] = useState<string | null>(null);
   const [optimizationAnalysis, setOptimizationAnalysis] = useState<OptimizationAnalysis | null>(null);
   const [optimizationAnalysisError, setOptimizationAnalysisError] = useState<string | null>(null);
+  const [knowledgeSnapshot, setKnowledgeSnapshot] = useState<EngineeringKnowledgeSnapshot | null>(null);
+  const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
+  const [knowledgeSuggestions, setKnowledgeSuggestions] = useState<KnowledgeSuggestion[] | null>(null);
+  const [knowledgeSuggestionsError, setKnowledgeSuggestionsError] = useState<string | null>(null);
+  const [engineeringCompletion, setEngineeringCompletion] = useState<EngineeringCompletionSnapshot | null>(null);
+  const [engineeringCompletionError, setEngineeringCompletionError] = useState<string | null>(null);
+  const [multimodalProjection, setMultimodalProjection] = useState<MultimodalAnalysisProjection | null>(null);
+  const [multimodalError, setMultimodalError] = useState<string | null>(null);
   async function load() {
     setLoading(true); setError(null); setSnapshot(null); setGeneration(null); setGenerationError(null); setGenerationLoading(false);
     setRuntime(null); setRuntimeError(null); setWorkspace(null); setWorkspaceError(null); setToolchain(null); setToolchainError(null); setComponents(null); setComponentsError(null);
@@ -131,13 +155,16 @@ export default function App() {
     setFirmware(null); setFirmwareBuild(null); setFirmwareDebug(null); setFirmwareError(null); setFirmwareBuildError(null); setFirmwareDebugError(null);
     setHILCapability(null); setHILObservation(null); setHILResult(null); setHILCapabilityError(null); setHILObservationError(null); setHILResultError(null);
     setDigitalTwin(null); setDigitalTwinError(null); setOptimizationAnalysis(null); setOptimizationAnalysisError(null);
+    setKnowledgeSnapshot(null); setKnowledgeError(null); setKnowledgeSuggestions(null); setKnowledgeSuggestionsError(null);
+    setEngineeringCompletion(null); setEngineeringCompletionError(null);
+    setMultimodalProjection(null); setMultimodalError(null);
     try {
       const loop = await fetchAutonomousLoop(projectId);
       setSnapshot(loop); setResourceLoading(true); setGenerationLoading(true);
       const results = await Promise.allSettled([
-        fetchGeneration(projectId), fetchRuntimeStatus(), fetchWorkspace(projectId), fetchToolchain(projectId), fetchComponents(projectId), fetchDevice(projectId), fetchObservation(projectId), fetchValidationLoop(projectId), fetchAutonomousV20(projectId), fetchToolCapability(projectId), fetchToolDevice(projectId), fetchHardwareDesign(projectId), fetchHardwareReview(projectId), fetchDebugAnalysis(projectId), fetchOptimization(projectId), fetchFirmware(projectId), fetchFirmwareBuild(projectId), fetchFirmwareDebug(projectId), fetchHILCapability(projectId), fetchHILObservation(projectId), fetchHILResult(projectId), fetchDigitalTwin(projectId), fetchOptimizationAnalysis(projectId),
+        fetchGeneration(projectId), fetchRuntimeStatus(), fetchWorkspace(projectId), fetchToolchain(projectId), fetchComponents(projectId), fetchDevice(projectId), fetchObservation(projectId), fetchValidationLoop(projectId), fetchAutonomousV20(projectId), fetchToolCapability(projectId), fetchToolDevice(projectId), fetchHardwareDesign(projectId), fetchHardwareReview(projectId), fetchDebugAnalysis(projectId), fetchOptimization(projectId), fetchFirmware(projectId), fetchFirmwareBuild(projectId), fetchFirmwareDebug(projectId), fetchHILCapability(projectId), fetchHILObservation(projectId), fetchHILResult(projectId), fetchDigitalTwin(projectId), fetchOptimizationAnalysis(projectId), fetchKnowledgeSnapshot(projectId), queryKnowledge(projectId, loop.fingerprint), fetchEngineeringCompletion(projectId), analyzeMultimodal(projectId, `source:${projectId}`, "DOCUMENT", loop.fingerprint),
       ]);
-      const [generationResult, runtimeResult, workspaceResult, toolchainResult, componentsResult, deviceResult, observationResult, validationResult, v20Result, toolCapabilityResult, adapterObservationResult, hardwareDesignResult, hardwareReviewResult, debugResult, optimizationResult, firmwareResult, firmwareBuildResult, firmwareDebugResult, hilCapabilityResult, hilObservationResult, hilResultResult, digitalTwinResult, optimizationAnalysisResult] = results;
+      const [generationResult, runtimeResult, workspaceResult, toolchainResult, componentsResult, deviceResult, observationResult, validationResult, v20Result, toolCapabilityResult, adapterObservationResult, hardwareDesignResult, hardwareReviewResult, debugResult, optimizationResult, firmwareResult, firmwareBuildResult, firmwareDebugResult, hilCapabilityResult, hilObservationResult, hilResultResult, digitalTwinResult, optimizationAnalysisResult, knowledgeResult, knowledgeSuggestionsResult, engineeringCompletionResult, multimodalResult] = results;
       if (generationResult.status === "fulfilled") setGeneration(generationResult.value);
       else setGenerationError(generationResult.reason instanceof GenerationRequestError ? generationResult.reason.code : "GENERATION_UNAVAILABLE");
       if (runtimeResult.status === "fulfilled") setRuntime(runtimeResult.value);
@@ -184,6 +211,14 @@ export default function App() {
       else setDigitalTwinError(digitalTwinResult.reason instanceof DigitalTwinRequestError ? digitalTwinResult.reason.code : "DIGITAL_TWIN_UNAVAILABLE");
       if (optimizationAnalysisResult.status === "fulfilled") setOptimizationAnalysis(optimizationAnalysisResult.value);
       else setOptimizationAnalysisError(optimizationAnalysisResult.reason instanceof OptimizationV26RequestError ? optimizationAnalysisResult.reason.code : "OPTIMIZATION_UNAVAILABLE");
+      if (knowledgeResult.status === "fulfilled") setKnowledgeSnapshot(knowledgeResult.value);
+      else setKnowledgeError(knowledgeResult.reason instanceof KnowledgeRequestError ? knowledgeResult.reason.code : "KNOWLEDGE_UNAVAILABLE");
+      if (knowledgeSuggestionsResult.status === "fulfilled") setKnowledgeSuggestions(knowledgeSuggestionsResult.value);
+      else setKnowledgeSuggestionsError(knowledgeSuggestionsResult.reason instanceof KnowledgeRequestError ? knowledgeSuggestionsResult.reason.code : "RETRIEVAL_UNAVAILABLE");
+      if (engineeringCompletionResult.status === "fulfilled") setEngineeringCompletion(engineeringCompletionResult.value);
+      else setEngineeringCompletionError(engineeringCompletionResult.reason instanceof EngineeringRequestError ? engineeringCompletionResult.reason.code : "ENGINEERING_COMPLETION_UNAVAILABLE");
+      if (multimodalResult.status === "fulfilled") setMultimodalProjection(multimodalResult.value);
+      else setMultimodalError(multimodalResult.reason instanceof MultimodalRequestError ? multimodalResult.reason.code : "MULTIMODAL_UNAVAILABLE");
     }
     catch (reason) {
       setError(reason instanceof AutonomousRequestError ? reason.code : "AUTONOMOUS_UNAVAILABLE");
@@ -192,6 +227,10 @@ export default function App() {
   return <div className="app"><section className="load-bar"><div><p className="eyebrow">Embedded Copilot v1.6</p><h1>Engineering Console</h1></div><form onSubmit={(event) => { event.preventDefault(); void load(); }}><label htmlFor="project-id">Project ID</label><div className="load-controls"><input id="project-id" value={projectId} onChange={(event) => setProjectId(event.target.value)} placeholder="camera-project" maxLength={96} /><button type="submit" disabled={loading || !projectId.trim()}>{loading ? "Loading..." : "Load snapshot"}</button></div></form></section>
     {error && <section className="safe-state" role="alert"><h2>{error}</h2><p>The autonomous loop snapshot is not available.</p></section>}
     {!error && snapshot && <><AutonomousLoopPanel snapshot={snapshot} /><GenerationPanel snapshot={generation} error={generationError} loading={generationLoading} /><FirmwarePanel snapshot={firmware} build={firmwareBuild} debug={firmwareDebug} error={firmwareError} buildError={firmwareBuildError} debugError={firmwareDebugError} loading={resourceLoading} /><DigitalTwinPanel snapshot={digitalTwin} error={digitalTwinError} loading={resourceLoading} /><OptimizationAnalysisPanel analysis={optimizationAnalysis} error={optimizationAnalysisError} loading={resourceLoading} /><HardwareCapabilityPanel snapshot={hilCapability} error={hilCapabilityError} loading={resourceLoading} /><HILDeviceObservationPanel snapshot={hilObservation} error={hilObservationError} loading={resourceLoading} /><HILValidationPanel result={hilResult} error={hilResultError} loading={resourceLoading} /><DebugPanel snapshot={debugSnapshot} error={debugError} loading={resourceLoading} /><OptimizationPanel proposal={optimization} error={optimizationError} loading={resourceLoading} onApprove={optimization ? () => { void approveOptimization(optimization).then(setOptimization).catch((reason) => setOptimizationError(reason instanceof OptimizationRequestError ? reason.code : "PROPOSAL_REJECTED")); } : undefined} onReject={optimization ? () => { void rejectOptimization(optimization).then(setOptimization).catch((reason) => setOptimizationError(reason instanceof OptimizationRequestError ? reason.code : "PROPOSAL_REJECTED")); } : undefined} /><div className="two-column"><ModelRuntimePanel status={runtime} error={runtimeError} loading={resourceLoading} /><WorkspacePanel snapshot={workspace} error={workspaceError} loading={resourceLoading} /><BuildPanel snapshot={toolchain} error={toolchainError} loading={resourceLoading} /><ToolStatusPanel snapshot={toolCapabilities} error={toolCapabilitiesError} loading={resourceLoading} /><BuildExecutionPanel result={null} error={null} loading={resourceLoading} /><FlashExecutionPanel result={null} error={null} loading={resourceLoading} /><DevicePanel snapshot={device} error={deviceError} loading={resourceLoading} /><DeviceObservationPanel snapshot={adapterObservation} error={adapterObservationError} loading={resourceLoading} /><FlashPanel error={null} loading={resourceLoading} /><ObservationPanel snapshot={observation} error={observationError} loading={resourceLoading} /></div><HardwareDesignPanel model={hardwareDesign} error={hardwareDesignError} loading={resourceLoading} /><HardwareReviewPanel findings={hardwareReview} error={hardwareReviewError} loading={resourceLoading} /><ValidationLoopPanel snapshot={validation} error={validationError} loading={resourceLoading} /><ComponentRecommendationPanel items={components} error={componentsError} loading={resourceLoading} />{v20Snapshot && <><LoopStagePanel snapshot={v20Snapshot} /><ApprovalPanel snapshot={v20Snapshot} onApprove={v20Snapshot.pending_action ? () => { void approveAutonomousAction(v20Snapshot.pending_action!.action_id, { action_id: v20Snapshot.pending_action!.action_id, action_fingerprint: v20Snapshot.pending_action!.action_fingerprint, reviewer: "web-reviewer", decided_at: new Date().toISOString() }).then(setV20Snapshot).catch((reason) => setV20Error(reason instanceof AutonomousV20RequestError ? reason.code : "LOOP_REJECTED")); } : undefined} onReject={v20Snapshot.pending_action ? () => { void rejectAutonomousAction(v20Snapshot.pending_action!.action_id, { action_id: v20Snapshot.pending_action!.action_fingerprint, action_fingerprint: v20Snapshot.pending_action!.action_fingerprint, reviewer: "web-reviewer", decided_at: new Date().toISOString() }).then(setV20Snapshot).catch((reason) => setV20Error(reason instanceof AutonomousV20RequestError ? reason.code : "LOOP_REJECTED")); } : undefined} /><RepairProposalPanel proposal={null} />{v20Error && <p className="muted">Workflow action is unavailable.</p>}</>}</>}
+    {!error && snapshot && <><KnowledgeGraphPanel snapshot={knowledgeSnapshot} error={knowledgeError} loading={resourceLoading} /><RecommendationPanel suggestions={knowledgeSuggestions} error={knowledgeSuggestionsError} loading={resourceLoading} /><EngineeringHistoryPanel snapshot={knowledgeSnapshot} /></>}
+    {!error && snapshot && engineeringCompletion && <><RequirementPanel requirement={engineeringCompletion.requirement} /><ArchitecturePanel architecture={engineeringCompletion.architecture} /><InterfacePanel interfaces={engineeringCompletion.interfaces} /><ReviewPanel reviews={engineeringCompletion.reviews} /></>}
+    {!error && snapshot && !engineeringCompletion && !resourceLoading && engineeringCompletionError && <section className="panel"><p className="muted">Engineering completion is unavailable.</p></section>}
+    {!error && snapshot && <><DocumentAnalysisPanel projection={multimodalProjection} error={multimodalError} loading={resourceLoading} />{multimodalProjection && <><MultimodalObservationPanel observation={multimodalProjection.observation} /><VisionResultPanel interpretation={multimodalProjection.interpretation} /></>}</>}
     {!error && !snapshot && !loading && <section className="empty-state"><h2>Choose a project</h2><p>Load a verified, read-only loop snapshot to inspect its current state.</p></section>}
   </div>;
 }

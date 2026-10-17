@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Literal
 
 import httpx
 import pytest
+from fastapi.testclient import TestClient
 
 from embedded_copilot.api.main import create_app
 from embedded_copilot.schemas.api import ChatResponse
@@ -104,7 +106,7 @@ def test_health_paths_report_v039(path: str) -> None:
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
-        "version": "0.39.0",
+        "version": "7.1.0",
         "mode": "offline",
     }
 
@@ -152,3 +154,58 @@ def test_internal_error_does_not_expose_diagnostic_detail(
     assert "private diagnostic detail" not in response.text
     assert "private diagnostic detail" not in caplog.text
     assert all(record.exc_info is None for record in caplog.records)
+
+
+@pytest.mark.parametrize("path", ["/api/v1/chat", "/chat"])
+def test_uninjected_llm_chat_fails_closed_without_canonical_provider(
+    path: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[object] = []
+
+    def forbidden_runtime(*args: object, **kwargs: object) -> object:
+        calls.append((args, kwargs))
+        raise AssertionError("legacy provider construction is forbidden")
+
+    monkeypatch.setattr("embedded_copilot.api.main.build_canonical_runtime", forbidden_runtime)
+    app = create_app(
+        settings=Settings(
+            _env_file=None,
+            runtime_mode="llm",
+            knowledge_dir=tmp_path / "knowledge",
+            chroma_path=tmp_path / "chroma",
+            desktop_state_database=tmp_path / "state" / "desktop.sqlite3",
+            desktop_project_metadata_directory=tmp_path / "metadata",
+        )
+    )
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(path, json={"message": "ESP32 SPI"})
+        health = client.get("/api/v1/health")
+
+    assert calls == []
+    assert response.status_code == 503
+    assert response.json()["error"] == {
+        "code": "model_error",
+        "message": "Chat runtime is unavailable.",
+        "retryable": False,
+    }
+    assert response.json()["trace_id"] == response.headers["x-trace-id"]
+    assert health.json()["status"] == "ok"
+
+
+def test_injected_llm_chat_service_remains_available(tmp_path: Path) -> None:
+    service = FakeCopilotService()
+    app = create_app(
+        service=service,
+        settings=Settings(
+            _env_file=None,
+            runtime_mode="llm",
+            desktop_state_database=tmp_path / "state" / "desktop.sqlite3",
+            desktop_project_metadata_directory=tmp_path / "metadata",
+        ),
+    )
+    with TestClient(app) as client:
+        response = client.post("/api/v1/chat", json={"message": "ESP32 SPI"})
+
+    assert response.status_code == 200
+    assert len(service.calls) == 1

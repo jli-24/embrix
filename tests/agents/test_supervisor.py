@@ -26,6 +26,38 @@ def test_classifier_routes_v010_requests(message: str, expected: Intent) -> None
     assert decision.reason
 
 
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("I2C在哪里初始化？", Intent.FIRMWARE),
+        ("STM32 I2C HAL API是什么？", Intent.KNOWLEDGE),
+        ("sensor_read为什么失败？", Intent.FIRMWARE),
+        ("HardFault崩溃原因", Intent.DEBUG),
+    ],
+)
+def test_classifier_distinguishes_firmware_source_semantics(
+    message: str, expected: Intent
+) -> None:
+    assert classify_intent(message).intent is expected
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        (
+            "请为当前 qdwq 的 STM32 新建工程设计系统需求与启动架构，不依赖现有源码。",
+            True,
+        ),
+        ("sensor_read 在哪里实现？", False),
+        ("请定位不存在的 sensor_read symbol", False),
+    ],
+)
+def test_classifier_marks_only_design_requests_as_greenfield_eligible(
+    message: str, expected: bool
+) -> None:
+    assert classify_intent(message).design_intent is expected
+
+
 def test_unknown_intent_does_not_select_an_agent() -> None:
     state = create_initial_state("你好", trace_id="trace-1")
 

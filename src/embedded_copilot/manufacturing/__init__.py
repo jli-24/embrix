@@ -1,0 +1,80 @@
+from .adapters import KiCadManufacturingAdapter  # noqa: F401
+from .board import (  # noqa: F401
+    BoardFacts,
+    CopperToEdgeMeasurement,
+    measure_copper_to_edge,
+    measure_copper_to_edge_text,
+    min_trace_spacing_from_routes,
+    read_board_facts,
+    render_board_facts,
+)
+from .contracts import *
+from .contracts import __all__ as _contract_all
+from .execution import ManufacturingExecutionBridge  # noqa: F401
+from .entry_gate import (  # noqa: F401
+    CanonicalManufacturingEntryGate,
+    ManufacturingEntryGatePort,
+    ManufacturingEntryGateReceipt,
+    ManufacturingEntryGateRejected,
+)
+from .pipeline import ManufacturingPipeline, ManufacturingPipelineResult  # noqa: F401
+from .service import (  # noqa: F401
+    FabricationModeResolver,
+    FabricationReadinessService,
+    ManufacturingPackageService,
+    ManufacturingParameterAuditService,
+    OutputFile,
+    audit_manufacturing_parameters,
+    build_manufacturing_specification,
+    build_source_revision,
+    close_manufacturing_parameters,
+    file_sha256,
+    output_files_from_artifacts,
+    output_records,
+    render_fabrication_closure,
+    render_fabrication_mode_audit,
+    render_fabrication_ready,
+    render_fabrication_report,
+    render_manufacturing_parameter_audit,
+    validate_bom,
+    verify_manufacturing_exports,
+)
+from .stores import FabricationStore  # noqa: F401
+
+__all__ = tuple(dict.fromkeys((*_contract_all, *(
+    "BoardFacts",
+    "CopperToEdgeMeasurement",
+    "FabricationModeResolver",
+    "FabricationReadinessService",
+    "FabricationStore",
+    "KiCadManufacturingAdapter",
+    "ManufacturingExecutionBridge",
+    "CanonicalManufacturingEntryGate",
+    "ManufacturingEntryGatePort",
+    "ManufacturingEntryGateReceipt",
+    "ManufacturingEntryGateRejected",
+    "ManufacturingPipeline",
+    "ManufacturingPipelineResult",
+    "ManufacturingPackageService",
+    "ManufacturingParameterAuditService",
+    "OutputFile",
+    "audit_manufacturing_parameters",
+    "build_manufacturing_specification",
+    "build_source_revision",
+    "close_manufacturing_parameters",
+    "render_manufacturing_parameter_audit",
+    "file_sha256",
+    "output_files_from_artifacts",
+    "output_records",
+    "render_fabrication_report",
+    "render_fabrication_mode_audit",
+    "render_fabrication_closure",
+    "render_fabrication_ready",
+    "read_board_facts",
+    "measure_copper_to_edge",
+    "measure_copper_to_edge_text",
+    "min_trace_spacing_from_routes",
+    "render_board_facts",
+    "validate_bom",
+    "verify_manufacturing_exports",
+))))

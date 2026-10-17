@@ -39,8 +39,15 @@ from embedded_copilot.coding_runtime.contracts.models import (
 _INCLUDE = re.compile(r'^\s*#\s*include\s*[<"]([^>"]+)[>"]', re.MULTILINE)
 _MACRO = re.compile(r"^\s*#\s*define\s+([A-Za-z_]\w*)", re.MULTILINE)
 _STRUCT = re.compile(r"\bstruct\s+([A-Za-z_]\w*)")
+_ENUM = re.compile(r"\benum\s+([A-Za-z_]\w*)")
 _CLASS = re.compile(r"\bclass\s+([A-Za-z_]\w*)")
 _FUNCTION = re.compile(r"([A-Za-z_]\w*)\s*\(")
+_VARIABLE = re.compile(
+    r"\b(?:const\s+)?(?:volatile\s+)?(?:unsigned\s+|signed\s+)?"
+    r"(?:char|short|int|long|float|double|bool|uint(?:8|16|32|64)_t|"
+    r"int(?:8|16|32|64)_t|[A-Za-z_]\w*)\s+\**([A-Za-z_]\w*)"
+    r"\s*(?:=|;|\[)"
+)
 _GPIO_WRITE = re.compile(
     r"\bHAL_GPIO_WritePin\s*\(\s*GPIO([A-Z])\s*,\s*GPIO_PIN_(\d{1,2})\b"
 )
@@ -57,6 +64,31 @@ class _ParsedFile:
     symbols: tuple[CodeSymbol, ...]
     dependencies: tuple[CodeDependency, ...]
     hardware_accesses: tuple[HardwareAccess, ...]
+    issue: ParseIssue | None
+
+
+@dataclass(frozen=True)
+class FirmwareParsedSymbol:
+    """Internal Tree-sitter result for project-scoped firmware indexing."""
+
+    name: str
+    symbol_type: str
+    line_start: int
+    line_end: int
+
+
+@dataclass(frozen=True)
+class FirmwareParsedCallEdge:
+    caller: str
+    callee: str
+    line: int
+
+
+@dataclass(frozen=True)
+class FirmwareParsedFile:
+    path: str
+    symbols: tuple[FirmwareParsedSymbol, ...]
+    calls: tuple[FirmwareParsedCallEdge, ...]
     issue: ParseIssue | None
 
 
@@ -94,6 +126,85 @@ class TreeSitterCodeParser:
         if language in {CodeLanguage.C, CodeLanguage.CPP}:
             return self._parse_c_family(path, content, language)
         return _ParsedFile(path, language, (), (), (), None)
+
+    def parse_firmware(self, path: str, content: str) -> FirmwareParsedFile:
+        """Parse the small C/C++ subset needed by FirmwareIndex.
+
+        This is deliberately source-structure extraction, not C semantic
+        analysis: direct calls, declarations and preprocessor references only.
+        """
+        language = _language_for(path)
+        if language not in {CodeLanguage.C, CodeLanguage.CPP}:
+            return FirmwareParsedFile(path, (), (), None)
+        parser = Parser(self._cpp if language is CodeLanguage.CPP else self._c)
+        tree = parser.parse(content.encode("utf-8"))
+        error_node = next((node for node in _walk(tree.root_node) if node.type == "ERROR"), None)
+        if error_node is not None:
+            return FirmwareParsedFile(
+                path,
+                (),
+                (),
+                ParseIssue(file=path, line=error_node.start_point[0] + 1, message="syntax error"),
+            )
+
+        symbols: list[FirmwareParsedSymbol] = []
+        calls: list[FirmwareParsedCallEdge] = []
+        for match in _INCLUDE.finditer(content):
+            symbols.append(FirmwareParsedSymbol(match.group(1), "include", _line_of(content, match.start(1)), _line_of(content, match.start(1))))
+        for match in _MACRO.finditer(content):
+            symbols.append(FirmwareParsedSymbol(match.group(1), "macro", _line_of(content, match.start(1)), _line_of(content, match.start(1))))
+        for match in _VARIABLE.finditer(content):
+            symbols.append(FirmwareParsedSymbol(match.group(1), "variable", _line_of(content, match.start(1)), _line_of(content, match.start(1))))
+
+        for node in _walk(tree.root_node):
+            source = content[node.start_byte:node.end_byte]
+            line_start = node.start_point[0] + 1
+            line_end = node.end_point[0] + 1
+            if node.type == "struct_specifier":
+                match = _STRUCT.search(source)
+                if match:
+                    symbols.append(FirmwareParsedSymbol(match.group(1), "struct", line_start, line_end))
+            elif node.type == "enum_specifier":
+                match = _ENUM.search(source)
+                if match:
+                    symbols.append(FirmwareParsedSymbol(match.group(1), "enum", line_start, line_end))
+            elif node.type == "function_definition":
+                names = _FUNCTION.findall(source)
+                if not names:
+                    continue
+                caller = names[0]
+                symbols.append(FirmwareParsedSymbol(caller, "function", line_start, line_end))
+                for child in _walk(node):
+                    if child.type != "call_expression":
+                        continue
+                    function = child.child_by_field_name("function")
+                    if function is None or function.type != "identifier":
+                        continue
+                    callee = content[function.start_byte:function.end_byte]
+                    calls.append(FirmwareParsedCallEdge(caller, callee, child.start_point[0] + 1))
+            elif node.type == "declaration" and any(
+                child.type == "function_declarator" for child in _walk(node)
+            ):
+                names = _FUNCTION.findall(source)
+                if names:
+                    symbols.append(
+                        FirmwareParsedSymbol(names[0], "function", line_start, line_end)
+                    )
+
+        unique_symbols = {
+            (item.name, item.symbol_type, item.line_start, item.line_end): item
+            for item in symbols
+        }
+        unique_calls = {
+            (item.caller, item.callee, item.line): item
+            for item in calls
+        }
+        return FirmwareParsedFile(
+            path,
+            tuple(unique_symbols[key] for key in sorted(unique_symbols, key=lambda value: (value[2], value[1], value[0]))),
+            tuple(unique_calls[key] for key in sorted(unique_calls)),
+            None,
+        )
 
     def _parse_c_family(
         self, path: str, content: str, language: CodeLanguage

@@ -95,6 +95,11 @@ class LocalDocumentLoader:
                     ),
                 )
                 for path in paths:
+                    if (
+                        domain == "firmware"
+                        and path.name.casefold() == "compile_commands.json"
+                    ):
+                        continue
                     suffix = path.suffix.casefold()
                     if suffix == ".md":
                         documents.append(_load_markdown(path, directory, domain))

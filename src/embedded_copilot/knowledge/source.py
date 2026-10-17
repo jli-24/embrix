@@ -45,6 +45,14 @@ class KnowledgeEvidence(_KnowledgeIntelligenceModel):
         ge=0,
         allow_inf_nan=False,
     )
+    project_id: str | None = None
+    tenant_id: str | None = None
+    source_reference: str | None = None
+    source_fingerprint: str | None = None
+    document_id: str | None = None
+    chunk_id: str | None = None
+    chunk_fingerprint: str | None = None
+    citation: str | None = None
 
     @field_validator("source_id", mode="before")
     @classmethod
@@ -76,14 +84,33 @@ class KnowledgeRetrieval(_KnowledgeIntelligenceModel):
     trace: KnowledgeTrace
 
 
-def project_result(result: KnowledgeResult) -> KnowledgeEvidence:
+def project_result(
+    result: KnowledgeResult,
+    *,
+    project_id: str | None = None,
+    tenant_id: str | None = None,
+) -> KnowledgeEvidence:
     validated = KnowledgeResult.model_validate(result.model_dump(mode="python"))
+    metadata_project_id = validated.metadata.get("project_id")
+    metadata_tenant_id = validated.metadata.get("tenant_id")
+    if project_id is not None and metadata_project_id not in {None, project_id}:
+        raise ValueError("knowledge evidence project binding is invalid")
+    if tenant_id is not None and metadata_tenant_id not in {None, tenant_id}:
+        raise ValueError("knowledge evidence tenant binding is invalid")
     normalized = " ".join(validated.content.split())[:512]
     return KnowledgeEvidence(
         source_id=validated.id,
         source_type=_source_type(validated),
         summary=normalized,
         relevance_score=validated.score,
+        project_id=(project_id or metadata_project_id if isinstance(project_id or metadata_project_id, str) else None),
+        tenant_id=(tenant_id or metadata_tenant_id if isinstance(tenant_id or metadata_tenant_id, str) else None),
+        source_reference=(validated.metadata.get("source_reference") if isinstance(validated.metadata.get("source_reference"), str) else f"knowledge:{validated.id}"),
+        source_fingerprint=(validated.metadata.get("document_fingerprint") if isinstance(validated.metadata.get("document_fingerprint"), str) else None),
+        document_id=(validated.metadata.get("document_id") if isinstance(validated.metadata.get("document_id"), str) else None),
+        chunk_id=(validated.metadata.get("chunk_id") if isinstance(validated.metadata.get("chunk_id"), str) else validated.id),
+        chunk_fingerprint=(validated.metadata.get("chunk_fingerprint") if isinstance(validated.metadata.get("chunk_fingerprint"), str) else None),
+        citation=f"{validated.title}:{validated.metadata.get('page')}" if validated.metadata.get("page") is not None else validated.title,
     )
 
 

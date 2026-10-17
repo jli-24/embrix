@@ -7,18 +7,7 @@ from typing import Any
 import httpx
 
 from embedded_copilot.intelligence.models import ModelCapability
-from embedded_copilot.model_runtime.health.models import ModelStatusResponse
-
-
-@dataclass(frozen=True, slots=True)
-class UnavailableStatusPort:
-    async def status(self) -> ModelStatusResponse:
-        return ModelStatusResponse(
-            provider="unavailable",
-            status="unavailable",
-            capabilities=(),
-            model=None,
-        )
+from embedded_copilot.model_status import ModelStatusResponse, UnavailableStatusPort
 
 
 @dataclass(frozen=True, slots=True)

@@ -4,7 +4,7 @@ import os
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 from .contracts import OperationType, ToolchainIdentity, identifier
 
@@ -16,8 +16,11 @@ class ToolFamily(StrEnum):
     ARM_NONE_EABI_GCC = "ARM_NONE_EABI_GCC"
     OPENOCD = "OPENOCD"
     STLINK = "STLINK"
+    PYOCD = "PYOCD"
     SERIAL_UART = "SERIAL_UART"
     FIRMWARE_TEST = "FIRMWARE_TEST"
+    RENODE = "RENODE"
+    KICAD_MANUFACTURING = "KICAD_MANUFACTURING"
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,27 +82,67 @@ _FORBIDDEN_LAUNCHERS = {
 class TrustedToolDiscovery:
     """Resolves only operator-configured tool families, never user paths."""
 
-    def __init__(self, *, trusted_roots: tuple[Path, ...] = (), trusted_versions: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        trusted_roots: tuple[Path, ...] = (),
+        trusted_versions: dict[str, str] | None = None,
+        explicit_paths: dict[str, Path] | None = None,
+        allow_environment_paths: bool = False,
+        known_install_roots: tuple[Path, ...] = (),
+        version_probe: Callable[[Path], str] | None = None,
+    ) -> None:
         self._trusted_roots = tuple(path.resolve(strict=False) for path in trusted_roots)
         self._trusted_versions = dict(trusted_versions or {})
+        self._explicit_paths = {key: Path(value).resolve(strict=False) for key, value in (explicit_paths or {}).items()}
+        self._allow_environment_paths = allow_environment_paths
+        self._known_install_roots = tuple(path.resolve(strict=False) for path in known_install_roots)
+        self._version_probe = version_probe
 
     def resolve(self, definition: ToolDefinition) -> ToolResolution:
         if any(name.casefold() in _FORBIDDEN_LAUNCHERS for name in definition.allowed_executable_names):
             return ToolResolution(definition, None, False, "UNAVAILABLE", "FORBIDDEN_TOOL_FAMILY")
-        if definition.allowed_executable_names and not self._trusted_roots:
+        configured = self._explicit_paths.get(definition.tool_id)
+        if definition.allowed_executable_names and not self._trusted_roots and configured is None and not self._allow_environment_paths and not self._known_install_roots:
             return ToolResolution(definition, None, False, "UNAVAILABLE", "TRUSTED_TOOL_ROOT_UNCONFIGURED")
-        for executable_name in definition.allowed_executable_names:
-            candidate = self._which(executable_name)
-            if candidate is None:
+        candidates: list[Path] = []
+        if configured is not None:
+            candidates.append(configured)
+        if self._allow_environment_paths:
+            environment_key = "EMBRIX_TOOLCHAIN_" + definition.tool_id
+            configured_environment = os.environ.get(environment_key, "").strip()
+            if configured_environment:
+                candidates.append(Path(configured_environment).resolve(strict=False))
+            for executable_name in definition.allowed_executable_names:
+                candidate = self._which(executable_name)
+                if candidate is not None:
+                    candidates.append(candidate)
+        for root in self._known_install_roots:
+            for executable_name in definition.allowed_executable_names:
+                candidate = (root / executable_name).resolve(strict=False)
+                if candidate.is_file():
+                    candidates.append(candidate)
+        for candidate in candidates:
+            if not candidate.is_file() or not os.access(candidate, os.X_OK):
+                continue
+            if candidate.name.casefold() not in {name.casefold() for name in definition.allowed_executable_names}:
                 continue
             if self._trusted_roots and not any(candidate.is_relative_to(root) for root in self._trusted_roots):
                 continue
-            if candidate.name.casefold() not in {name.casefold() for name in definition.allowed_executable_names}:
+            if not self._trusted_roots and configured is None and not self._allow_environment_paths and not any(candidate.is_relative_to(root) for root in self._known_install_roots):
+                continue
+            if candidate is None:
                 continue
             configured_version = self._trusted_versions.get(definition.tool_id)
             if configured_version != definition.tool_version:
                 return ToolResolution(definition, None, False, "UNAVAILABLE", "TOOL_VERSION_UNVERIFIED")
-            return ToolResolution(definition, candidate, True, "AVAILABLE", "TOOL_RESOLVED")
+            if self._version_probe is not None:
+                try:
+                    if self._version_probe(candidate.resolve(strict=True)) != definition.tool_version:
+                        return ToolResolution(definition, None, False, "UNAVAILABLE", "TOOL_VERSION_UNVERIFIED")
+                except (OSError, PermissionError, TimeoutError, ValueError):
+                    return ToolResolution(definition, None, False, "UNAVAILABLE", "TOOL_VERSION_PROBE_FAILED")
+            return ToolResolution(definition, candidate.resolve(strict=True), True, "AVAILABLE", "TOOL_RESOLVED")
         if not definition.allowed_executable_names:
             return ToolResolution(definition, None, True, "AVAILABLE", "NON_PROCESS_ADAPTER")
         return ToolResolution(definition, None, False, "UNAVAILABLE", "TOOL_NOT_FOUND")
@@ -122,12 +165,18 @@ class ExecutionToolRegistry:
     _definitions = (
         ToolDefinition("ESP_IDF_BUILD", "v5.3", ToolFamily.ESP_IDF, OperationType.BUILD, ("ESP32-S3",), ("idf.py", "idf.exe"), 600, ("BIN",)),
         ToolDefinition("ESPTOOL_FLASH", "v4", ToolFamily.ESPTOOL, OperationType.FLASH, ("ESP32-S3",), ("esptool", "esptool.py", "esptool.exe"), 300),
-        ToolDefinition("SERIAL_UART", "1", ToolFamily.SERIAL_UART, OperationType.UART_OBSERVATION, ("ESP32-S3", "STM32F446RE"), (), 300),
+        ToolDefinition("SERIAL_UART", "1", ToolFamily.SERIAL_UART, OperationType.UART_OBSERVATION, ("ESP32-S3", "STM32F446RE", "STM32F103C8T6"), (), 300),
         ToolDefinition("CMAKE_NINJA_BUILD", "3", ToolFamily.CMAKE_NINJA, OperationType.BUILD, ("STM32F446RE",), ("cmake", "cmake.exe"), 600, ("ELF", "BIN", "HEX", "MAP")),
-        ToolDefinition("ARM_NONE_EABI_GCC", "13", ToolFamily.ARM_NONE_EABI_GCC, OperationType.BUILD, ("STM32F446RE",), ("arm-none-eabi-gcc", "arm-none-eabi-gcc.exe"), 600, ("ELF", "BIN", "HEX", "MAP")),
-        ToolDefinition("OPENOCD_FLASH", "0.12", ToolFamily.OPENOCD, OperationType.FLASH, ("STM32F446RE",), ("openocd", "openocd.exe"), 300),
-        ToolDefinition("STLINK_FLASH", "1", ToolFamily.STLINK, OperationType.FLASH, ("STM32F446RE",), ("STM32_Programmer_CLI", "STM32_Programmer_CLI.exe"), 300),
+        ToolDefinition("ARM_NONE_EABI_GCC", "15.3.1", ToolFamily.ARM_NONE_EABI_GCC, OperationType.BUILD, ("STM32F103C8T6", "STM32F446RE"), ("arm-none-eabi-gcc", "arm-none-eabi-gcc.exe"), 600, ("ELF", "BIN", "HEX", "MAP")),
+        ToolDefinition("OPENOCD_FLASH", "0.12", ToolFamily.OPENOCD, OperationType.FLASH, ("STM32F446RE", "STM32F103C8T6"), ("openocd", "openocd.exe"), 300),
+        ToolDefinition("STLINK_FLASH", "1", ToolFamily.STLINK, OperationType.FLASH, ("STM32F446RE", "STM32F103C8T6"), ("STM32_Programmer_CLI", "STM32_Programmer_CLI.exe"), 300),
+        ToolDefinition("PYOCD_FLASH", "0.36", ToolFamily.PYOCD, OperationType.FLASH, ("STM32F103C8T6",), ("pyocd", "pyocd.exe"), 300),
         ToolDefinition("FIRMWARE_TEST", "1", ToolFamily.FIRMWARE_TEST, OperationType.TEST, ("ESP32-S3", "STM32F446RE"), (), 300, ("ELF", "BIN", "HEX", "MAP")),
+        ToolDefinition("RENODE_SIMULATION", "1.16.1", ToolFamily.RENODE, OperationType.SIMULATION, ("STM32F103C8T6",), ("renode.exe", "renode"), 900, ("ELF",)),
+        ToolDefinition("KICAD_GERBER_EXPORT", "10.0.5", ToolFamily.KICAD_MANUFACTURING, OperationType.KICAD_GERBER_EXPORT, ("STM32F103C8T6",), ("kicad-cli.exe", "kicad-cli"), 180, ("GERBER",)),
+        ToolDefinition("KICAD_DRILL_EXPORT", "10.0.5", ToolFamily.KICAD_MANUFACTURING, OperationType.KICAD_DRILL_EXPORT, ("STM32F103C8T6",), ("kicad-cli.exe", "kicad-cli"), 180, ("DRILL",)),
+        ToolDefinition("KICAD_POSITION_EXPORT", "10.0.5", ToolFamily.KICAD_MANUFACTURING, OperationType.KICAD_POSITION_EXPORT, ("STM32F103C8T6",), ("kicad-cli.exe", "kicad-cli"), 180, ("CPL",)),
+        ToolDefinition("MANUFACTURING_PACKAGE_BUILD", "1", ToolFamily.KICAD_MANUFACTURING, OperationType.MANUFACTURING_PACKAGE_BUILD, ("STM32F103C8T6",), (), 120, ("MANIFEST", "MANUFACTURING_PACKAGE")),
     )
 
     def __init__(self, discovery: ToolDiscoveryPort) -> None:
@@ -153,7 +202,30 @@ class ExecutionToolRegistry:
                 "UNAVAILABLE",
                 "TEST_ADAPTER_NOT_CONFIGURED",
             )
-        return self._discovery.resolve(definition)
+        resolved = self._discovery.resolve(definition)
+        if not isinstance(resolved, ToolResolution) or resolved.definition != definition:
+            return ToolResolution(
+                definition, None, False, "UNAVAILABLE", "TOOL_RESOLUTION_INVALID"
+            )
+        if resolved.status == "AVAILABLE":
+            process_tool = bool(definition.allowed_executable_names)
+            if (
+                not resolved.version_verified
+                or (process_tool and resolved.executable is None)
+                or (
+                    resolved.executable is not None
+                    and resolved.executable.name.casefold()
+                    not in {name.casefold() for name in definition.allowed_executable_names}
+                )
+            ):
+                return ToolResolution(
+                    definition, None, False, "UNAVAILABLE", "TOOL_RESOLUTION_INVALID"
+                )
+        elif resolved.executable is not None or resolved.version_verified:
+            return ToolResolution(
+                definition, None, False, "UNAVAILABLE", "TOOL_RESOLUTION_INVALID"
+            )
+        return resolved
 
     def discover(self, operation: OperationType) -> tuple[ExecutionCapabilityDescriptor, ...]:
         """Return safe registry projections without resolving process tools."""

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  fetchExecutionStatus,
   projectExecutionEvent,
   streamExecutionEvents,
   type ExecutionOperationStatus,
@@ -89,5 +90,18 @@ describe("execution event replay client", () => {
 
     expect(matching.status).toBe("RUNNING");
     expect(foreign).toBe(matching);
+  });
+});
+
+
+describe("ERC approval context status", () => {
+  it("keeps canonical context on GET and accepts legacy status without it", async () => {
+    const body = { operation_id: "erc-1", project_id: "project-1", operation_type: "KICAD_SCHEMATIC_ERC", schematic_approval_context: { fingerprint: "sha256:erc", requester_id: "user-1", expires_at: "2099-01-01T00:00:00Z", conversation_id: "conversation-1", schematic_artifact_fingerprint: "sha256:artifact", source_operation_id: "write-1", source_operation_receipt_fingerprint: "sha256:write", source_parse_operation_id: "parse-1", source_parse_receipt_fingerprint: "sha256:parse", proposal_id: "plan-1", proposal_fingerprint: "sha256:plan" } };
+    const fetcher = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify(body))).mockResolvedValueOnce(new Response(JSON.stringify({ ...body, schematic_approval_context: undefined })));
+    const first = await fetchExecutionStatus("project-1", "erc-1", fetcher);
+    expect(first.schematic_approval_context?.source_parse_operation_id).toBe("parse-1");
+    const legacy = await fetchExecutionStatus("project-1", "erc-1", fetcher);
+    expect(legacy.schematic_approval_context).toBeUndefined();
+    expect(fetcher).toHaveBeenCalledWith("/api/v1/copilot/operations/erc-1/status?project_id=project-1", expect.objectContaining({ credentials: "same-origin" }));
   });
 });

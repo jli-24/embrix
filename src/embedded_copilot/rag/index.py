@@ -18,7 +18,16 @@ class IngestionReport:
     deleted: int = 0
 
 
-def _metadata(chunk: DocumentChunk) -> dict[str, str | int]:
+def _metadata(
+    chunk: DocumentChunk,
+    *,
+    tenant_id: str | None = None,
+    project_id: str | None = None,
+    document_id: str | None = None,
+    document_fingerprint: str | None = None,
+    ingestion_revision: str | None = None,
+    embedding_identity: str | None = None,
+) -> dict[str, str | int]:
     metadata: dict[str, str | int] = {
         "source": chunk.source,
         "filename": chunk.filename,
@@ -39,6 +48,19 @@ def _metadata(chunk: DocumentChunk) -> dict[str, str | int]:
         metadata["section"] = chunk.section
     if chunk.metadata.chapter is None and chunk.section is not None:
         metadata["chapter"] = chunk.section
+    if tenant_id is not None:
+        metadata["tenant_id"] = tenant_id
+    if project_id is not None:
+        metadata["project_id"] = project_id
+    if document_id is not None:
+        metadata["document_id"] = document_id
+    if document_fingerprint is not None:
+        metadata["document_fingerprint"] = document_fingerprint
+    if ingestion_revision is not None:
+        metadata["ingestion_revision"] = ingestion_revision
+    if embedding_identity is not None:
+        metadata["embedding_identity"] = embedding_identity
+    metadata["chunk_fingerprint"] = f"sha256:{chunk.content_hash}"
     return metadata
 
 
@@ -48,6 +70,12 @@ def index_chunks(
     embedding: EmbeddingProvider,
     *,
     active_sources: Sequence[str] | None = None,
+    tenant_id: str | None = None,
+    project_id: str | None = None,
+    document_id_by_source: dict[str, str] | None = None,
+    document_fingerprint_by_source: dict[str, str] | None = None,
+    ingestion_revision_by_source: dict[str, str] | None = None,
+    embedding_identity: str | None = None,
 ) -> IngestionReport:
     if not chunks and active_sources is None:
         return IngestionReport(inserted=0, updated=0, unchanged=0, deleted=0)
@@ -98,7 +126,18 @@ def index_chunks(
     if stale_ids:
         collection.delete(ids=stale_ids)
 
-    incoming_metadata = {chunk.chunk_id: _metadata(chunk) for chunk in chunks}
+    incoming_metadata = {
+        chunk.chunk_id: _metadata(
+            chunk,
+            tenant_id=tenant_id,
+            project_id=project_id,
+            document_id=(document_id_by_source or {}).get(chunk.source),
+            document_fingerprint=(document_fingerprint_by_source or {}).get(chunk.source),
+            ingestion_revision=(ingestion_revision_by_source or {}).get(chunk.source),
+            embedding_identity=embedding_identity,
+        )
+        for chunk in chunks
+    }
     changed = [
         chunk
         for chunk in chunks

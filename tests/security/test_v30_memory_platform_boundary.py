@@ -7,7 +7,6 @@ from pathlib import Path
 from embedded_copilot.engineering_memory import EngineeringMemoryRetrievalPort
 from embedded_copilot.knowledge_writer import KnowledgeWriterPort
 
-
 ROOT = Path(__file__).parents[2]
 SRC = ROOT / "src" / "embedded_copilot"
 MEMORY_PACKAGES = (
@@ -76,7 +75,17 @@ def _imports(tree: ast.AST) -> tuple[str, ...]:
 def test_memory_platform_has_no_agent_workflow_or_runtime_dependencies() -> None:
     for path in (item for target in MEMORY_PACKAGES for item in _files(target)):
         for module in _imports(_tree(path)):
-            assert module.split(".", 1)[0] not in FORBIDDEN_ROOTS, (path, module)
+            root = module.split(".", 1)[0]
+            # The v7.2.2 persistence adapter is the sole, explicit SQLite
+            # boundary.  It remains outside Runtime/Agent access and is
+            # covered by its own fail-closed migration tests.
+            if path.name == "foundation_sqlite.py" and root in {
+                "sqlite3",
+                "pathlib",
+                "threading",
+            }:
+                continue
+            assert root not in FORBIDDEN_ROOTS, (path, module)
             assert not any(
                 module == prefix or module.startswith(f"{prefix}.")
                 for prefix in FORBIDDEN_IMPORT_PREFIXES
